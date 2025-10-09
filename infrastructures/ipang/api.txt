@@ -1,0 +1,73 @@
+app_id = xp6121770875700571
+app_secret = VnaAJspwH89hPtu3ef2EGZL75MjYvcB6
+
+搜索接口
+get https://ai.ipangsell.com/product/mall/query
+
+参数：
+area：区域，普陀区/静安区/...，可为空字符串，最多只能传一个区域
+amount：总价（万），单个值：1000，或者范围值：800,1000，范围用英文逗号连接
+apikey: xp6121770875700571
+count：房间数，单个值：3，多个值：3,4,5，用英文逗号连接
+nonce: 32位随机字符串
+plate：板块，浦江,七宝，可为空字符串，可传多个板块，用英文逗号连接
+size：面积（㎡），单个值：100，或者范围值：80,100，范围用英文逗号连接
+timestamp：时间戳，秒, UNIX时间戳
+signature：签名值
+
+
+签名计算过程
+1.所有参数和对应的值用=拼接，然后按照参数字母顺序从小到大排列，用&拼接
+amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&size=xxx&timestamp=xxx
+2.第1步得到的字符串后面拼接&和app_secret值
+amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx
+3.对第2步得到的字符串进行md5计算，结果即为signature的值
+signature=md5(amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx)"					
+测试：
+查询总价1000万附近、面积80-160㎡的3房楼盘
+https://ai.ipangsell.com/product/mall/query?area=&plate=&amount=1000&size=80,160&count=3&apikey=xp6121770875700571&nonce=ei781pf416kiyshraia188elpaw69d49&timestamp=1755576608&signature=50e7c3af89533a8790b31507b4134a09
+https://ai.ipangsell.com/product/mall/query?area=%E9%9D%99%E5%AE%89&apikey=xp6121770875700571&timestamp=1757559812&size=120&plate=%E5%8D%97%E4%BA%AC%E8%A5%BF%E8%B7%AF&amount=400%2C600&count=4&nonce=a12cfcfdeb3070a5e2888f38bf0a351b&signature=f9a69f340046b918cc02d42b74018f19
+
+
+==========================================================
+POST API
+==========================================================
+搜索接口
+post https://ai.ipangsell.com/product/mall/query
+
+参数：
+area：区域，普陀区/静安区/...，可为空字符串，最多只能传一个区域
+plate：板块，浦江,七宝，可为空字符串，可传多个板块，用英文逗号连接
+amount：总价（万），单个值：1000，或者范围值：800,1000，范围用英文逗号连接
+size：面积（㎡），单个值：100，或者范围值：80,100，范围用英文逗号连接
+count：房间数，单个值：3，多个值：3,4,5，用英文逗号连接
+qas: 用户的问答列表，json字符串，q代表AI的问题，a代表用户的回答，可以有多个，例如：'[{"q": "请问您有什么问题？", "a": "1000万在哪里买房子比较好"}, {"q": "面积有要求吗？", "a": "100平左右"}]'
+apikey: xp6121770875700571
+nonce: 32位随机字符串
+timestamp：时间戳，秒
+signature：签名值
+
+签名计算过程
+1.所有参数和对应的值用=拼接，然后按照参数字母顺序从小到大排列，用&拼接
+amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&qas=xxx&size=xxx&timestamp=xxx
+2.第1步得到的字符串后面拼接&和app_secret值
+amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&qas=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx
+3.对第2步得到的字符串进行md5计算，结果即为signature的值
+signature=md5(amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&qas=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx)"				
+测试：
+查询总价1000万附近、面积80-160㎡的3房楼盘
+post https://ai.ipangsell.com/product/mall/query
+post数据: 
+{'area': '', 'plate': '', 'amount': '1000', 'size': '80,160', 'count': '3', 'qas': '[{"q": "请问您有什么问题？", "a": "1000万在哪里买房子比较好"}, {"q": "面积有要求吗？", "a": "100平左右"}]', 'apikey': 'xp6121770875700571', 'nonce': 'omq6xs3hmfdejm468mxqxb978zuxgrjs', 'timestamp': 1757576460, 'signature': 'baa7ea3bceeab03ba1a6f953e282f911'}
+
+返回数据：
+status：int，0正常，1错误
+detail：若status=1，则此处为具体的错误信息，若status=0，则此处为正常返回的数据
+new_house：新房列表
+new_house_error: 新房查询不出结果的原因
+new_house_exist_params: 新房已查询出结果的参数字段
+new_house_no_exist_params: 新房查询不出结果的字段
+sec_house：二手房列表
+sec_house_error: 二手房查询不出结果的原因
+sec_house_exist_params: 二手房已查询出结果的参数字段
+sec_house_no_exist_params: 二手房查询不出结果的字段

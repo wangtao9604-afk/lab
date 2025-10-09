@@ -1,0 +1,1090 @@
+0) 目标与范围
+在 models/schedule/keywords.go 调用 IPang 之前，把本轮对话的 []ipang.QA 整体序列化后写入 Kafka Topic qywx-recorder.v1（一条 Kafka 消息承载一轮多条问/答）。
+新增微服务 app/recorder/：订阅并消费该 Topic，拆分成行写入 MySQL（GORM v2）。
+生产端不启用 DLQ（错误只写日志）。
+将 Kafka 单条消息容量提升到~5 MB（建议配 20% 余量），并保证复制与消费链路同步可承载。
+不要求严格串行，recorder 可水平扩展；每分区可并发处理，连续提交由 PartitionCommitGate（kmq 内）保证。
+
+1) 数据契约（定稿）
+Topic：qywx-recorder
+Key：user_id（建议用 event.ExternalUserID，热点更均衡；recorder 不要求强序）
+Headers：
+schema: "ipang.qa.v1"
+user_id: <ExternalUserID>（必需）
+occurred: <unix seconds>（统一发生时间，本批所有记录相同；由 Producer 生成）
+（可选）qa_pairs: <len(qas)>, produced_at: <unix>, producer_instance: <pod/host>
+Value：JSON([]ipang.QA)，形如：
+[
+  {"q": "你好", "a": "你好！有什么可以帮你？"},
+  {"q": "帮我查订单", "a": "请提供订单号。"}
+]
+说明：recorder 仅需把 value 反序列化回 []ipang.QA，无需尝试 envelope 等其它格式。
+
+
+2) Kafka：把单条消息容量抬到 ~5 MB（建议留 20% 余量 → 配置为 6 MiB）
+要同步调整的四处阈值（最终上限取四者最小值）：
+1. Topic/Broker 接纳阈值
+   1.1 Topic 级：max.message.bytes（压缩后允许写入的记录批上限）；
+   1.2 Broker 级：message.max.bytes（Topic 默认值来源）。
+
+2. Broker 副本抓取阈值（保证复制不失败）
+   2.1 replica.fetch.max.bytes ≥ message.max.bytes；默认约 1 MiB。
+   2.2 replica.fetch.response.max.bytes 要相应放大（默认 10 MiB）。
+
+3. Producer 发送阈值
+   使用 librdkafka/Confluent 客户端，需放大生产侧请求/批次上限（社区常见做法是调大 message.max.bytes 与/或 max.request.size——不同客户端命名不同；librdkafka 文档与实践存在历史差异，保守做法是两者都调大）。
+   
+4. Consumer 拉取阈值
+   max.partition.fetch.bytes（单分区一次最多拉多少；默认约 1 MiB）和 fetch.max.bytes（一次请求总量；默认 50 MiB）需覆盖大消息；
+   官方语义：首批大于阈值时“仍会返回”以保证前进，但不要依赖该例外，应显式调大。
+
+2.1 推荐具体值（以 6 MiB 作为 5 MB 的安全上限）
+    6 MiB = 6,291,456 字节。
+    
+    2.1.1 Topic（优先 per-topic 配置）
+          max.message.bytes = 6291456
+
+    2.2.2 Kafka CLI 示例：
+          kafka-configs --bootstrap-server <broker> \
+          --alter --entity-type topics --entity-name qywx-recorder \
+          --add-config max.message.bytes=6291456
+    2.2.3 Broker（如你们不方便逐 Topic 配置或做默认兜底）
+          message.max.bytes = 6291456
+          replica.fetch.max.bytes = 6291456        # 必须 ≥ message.max.bytes
+          replica.fetch.response.max.bytes = 67108864  # 64 MiB，足量
+          这些为 broker/server 级配置，需滚动重启生效。
+
+    2.2.4 Producer（librdkafka / Confluent 客户端）
+          message.max.bytes = 6291456
+          max.request.size = 6291456
+          compression.type = lz4
+          linger.ms = 10..20
+          由于 Java 客户端与 librdkafka 在“哪个参数控制生产端消息上限”上有历史差异，两者都配置最稳妥。
+
+    2.2.5 Consumer（librdkafka / Confluent 客户端）
+          max.partition.fetch.bytes = 6291456
+          fetch.max.bytes = 67108864  # 64 MiB（覆盖多分区聚合）
+          fetch.wait.max.ms = 50
+    配完后做一次全链路压测：生产 → Broker 接收 → 副本复制 → 消费拉取，观察内存占用、吞吐与 GC。官方默认与语义详见 Apache/Confluent 文档。
+
+3) 生产侧改造（models/schedule/keywords.go）
+时机：调用 IPang 之前。
+动作：把当次会话的 []ipang.QA 序列化为 []byte 写入 qywx-recorder；不启用 Producer‑DLQ，Produce 失败只打错误日志。
+
+// 伪代码：参考 kmq 的常用用法
+func (s *Service) sendQAsToRecorder(ctx context.Context, userID string, qas []ipang.QA) {
+    val, err := json.Marshal(qas)
+    if err != nil {
+        log.GetInstance().Sugar.Warnf("marshal QAs failed: %v", err)
+        return
+    }
+    occurred := time.Now().Unix()
+
+    key := []byte(userID)
+    headers := []kafka.Header{
+        {Key: "schema",      Value: []byte("ipang.qa.v1")},
+        {Key: "user_id",     Value: []byte(userID)},
+        {Key: "occurred",    Value: []byte(strconv.FormatInt(occurred, 10))},
+        {Key: "qa_pairs",    Value: []byte(strconv.Itoa(len(qas)))},
+        {Key: "produced_at", Value: []byte(strconv.FormatInt(time.Now().Unix(), 10))},
+    }
+
+    if err := s.recorderProducer.Produce("qywx-recorder", key, val, headers); err != nil {
+        // ✅ 不使用 Producer-DLQ：仅记错误日志
+        log.GetInstance().Sugar.Errorf("produce recorder batch failed: %v", err)
+        return
+    }
+}
+
+Producer 构造（示意）：
+
+p, err := kmq.NewProducer(conf.Kafka.Brokers, "qywx-producer-recorder")
+// 配置中确保：message.max.bytes / max.request.size ≥ 6MiB，压缩 lz4，acks=all，enable.idempotence=true
+
+
+4) MySQL 表结构（GORM v2）与幂等策略
+业务字段只有 4 个：userId、source（USER|AI）、content、occurred。为对抗至少一次与重复回放，我们在表上加唯一索引；有两种实现方式：
+
+生成列做去重（应用只写 4 字段）
+
+CREATE TABLE IF NOT EXISTS conversation_records (
+  id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  user_id          VARCHAR(64)     NOT NULL,
+  source           ENUM('USER','AI') NOT NULL,
+  content          MEDIUMTEXT      NOT NULL,
+  occurred         DATETIME(3)     NOT NULL,
+
+  -- 生成列：由 content 计算 SHA-256（用于去重）
+  content_digest   BINARY(32) GENERATED ALWAYS AS (UNHEX(SHA2(content, 256))) STORED,
+
+  created_at       DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at       DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_rec_dedup (user_id, source, occurred, content_digest),
+  KEY idx_user_occurred (user_id, occurred),
+  KEY idx_occurred (occurred)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+GORM AutoMigrate 不会自动生成“生成列”，建议把上面 DDL 放到 migrations 执行。
+
+GORM 模型（无需声明 digest 列）：
+
+type ConversationRecord struct {
+    ID        uint64    `gorm:"primaryKey;autoIncrement"`
+    UserID    string    `gorm:"column:user_id;type:varchar(64);not null"`
+    Source    string    `gorm:"column:source;type:enum('USER','AI');not null"`
+    Content   string    `gorm:"column:content;type:mediumtext;not null"`
+    Occurred  time.Time `gorm:"column:occurred;type:datetime(3);not null"`
+    CreatedAt time.Time `gorm:"column:created_at;type:datetime(3)"`
+    UpdatedAt time.Time `gorm:"column:updated_at;type:datetime(3)"`
+}
+func (ConversationRecord) TableName() string { return "conversation_records" }
+
+批量入库（幂等）：
+
+type Repo struct{ db *gorm.DB }
+
+func (r *Repo) InsertBatch(ctx context.Context, rows []ConversationRecord, batchSize int) error {
+    if len(rows) == 0 { return nil }
+    return r.db.WithContext(ctx).
+        Clauses(clause.OnConflict{DoNothing: true}). // 命中唯一键 → 忽略该行
+        CreateInBatches(rows, batchSize).
+        Error
+}
+OnConflict{DoNothing:true} 让重复行被静默忽略、其他行继续写入，天然满足“至少一次”语义下的幂等。
+
+在 infrastructures/db/mysql/migrations/ 下建立两个sql文件：
+1. create.sql --> 对应新建的情况 
+
+-- 创建对话记录表（含生成列与唯一索引）
+CREATE TABLE IF NOT EXISTS conversation_records (
+  id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  user_id          VARCHAR(64)     NOT NULL,
+  source           ENUM('USER','AI') NOT NULL,
+  content          MEDIUMTEXT      NOT NULL,
+  occurred         DATETIME(3)     NOT NULL,
+
+  -- 生成列：由 content 计算 SHA-256，作为去重锚点（数据库自动计算，应用不用写）
+  content_digest   BINARY(32)
+    GENERATED ALWAYS AS (UNHEX(SHA2(content, 256))) STORED,
+
+  created_at       DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at       DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+                                   ON UPDATE CURRENT_TIMESTAMP(3),
+
+  PRIMARY KEY (id),
+
+  -- 幂等唯一约束：同一 user_id + source + occurred 下，content 哈希相同则判定为重复
+  UNIQUE KEY uk_rec_dedup (user_id, source, occurred, content_digest),
+
+  -- 便于常见查询的二级索引（可按需调整）
+  KEY idx_user_occurred (user_id, occurred),
+  KEY idx_occurred (occurred)
+)
+ENGINE = InnoDB
+DEFAULT CHARSET = utf8mb4
+COLLATE = utf8mb4_0900_ai_ci;
+
+2. migrate.sql --> 对应迁移，需要增加column, index的情况
+
+-- 1) 如果没有 content_digest 列，则新增为“生成列”
+SET @col_exists := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'conversation_records'
+     AND COLUMN_NAME = 'content_digest'
+);
+SET @sql := IF(
+  @col_exists = 0,
+  'ALTER TABLE conversation_records
+     ADD COLUMN content_digest BINARY(32)
+     GENERATED ALWAYS AS (UNHEX(SHA2(content, 256))) STORED
+     AFTER occurred;',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 2) 如果没有唯一约束 uk_rec_dedup，则新增
+SET @idx_exists := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+   WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'conversation_records'
+     AND INDEX_NAME = 'uk_rec_dedup'
+);
+SET @sql := IF(
+  @idx_exists = 0,
+  'ALTER TABLE conversation_records
+     ADD UNIQUE KEY uk_rec_dedup (user_id, source, occurred, content_digest);',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 3) （可选）补齐二级索引
+SET @i1 := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+   WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'conversation_records'
+     AND INDEX_NAME = 'idx_user_occurred'
+);
+SET @sql := IF(
+  @i1 = 0,
+  'ALTER TABLE conversation_records
+     ADD KEY idx_user_occurred (user_id, occurred);',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @i2 := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+   WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'conversation_records'
+     AND INDEX_NAME = 'idx_occurred'
+);
+SET @sql := IF(
+  @i2 = 0,
+  'ALTER TABLE conversation_records
+     ADD KEY idx_occurred (occurred);',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+
+5) app/recorder 微服务
+  5.1 消费与并发策略
+      Subscribe：qywx-recorder，group.id = qywx-recorder-group，partition.assignment.strategy = cooperative-sticky。
+      手动提交：enable.auto.commit=false，enable.auto.offset.store=false。
+      分区内并发：MaxInflightPerPartition = 128；PartitionCommitGate 在 ack 后连续推进提交点，保证“处理完成 → 连续提交”。
+      失败处理：
+              JSON 解包失败 / user_id 缺失 / MySQL 长时间不可用 → 记错误日志并推进提交（避免卡分区）。
+  5.2 关键代码（与 kmq 的上层风格一致）
+
+  5.2.1 生产侧：调用 kmq.Producer 写入 qywx-recorder
+        契约：value = JSON([]ipang.QA)；Headers 至少包含 user_id 与统一的 occurred（本批所有记录相同）。
+
+        package schedule
+
+        import (
+	             "context"
+	             "encoding/json"
+	             "strconv"
+	             "time"
+
+	             "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+
+	             "your/module/path/infrastructures/mq/kmq"
+	             "your/module/path/models/ipang" // 你的 QA 类型定义所在包
+	             "your/module/path/log"
+         )
+
+        type RecorderProducer interface {
+	         Produce(topic string, key, value []byte, headers []kafka.Header) error
+        }
+
+        type Service struct {
+	         recorderTopic    string
+	         recorderProducer RecorderProducer // 一般直接注入 *kmq.Producer
+        }
+
+        func (s *Service) sendQAsToRecorder(ctx context.Context, userID string, qas []ipang.QA) {
+	           // 1) 序列化 []ipang.QA
+	         val, err := json.Marshal(qas)
+	         if err != nil {
+		        log.GetInstance().Sugar.Warnf("marshal QAs failed: %v", err)
+		        return
+	         }
+
+	         // 2) 统一发生时间（本批所有记录相同）
+	         occurred := time.Now().Unix()
+
+	         // 3) 以 user_id 作为 key（有利于热点分散；recorder 不要求严格顺序）
+	         key := []byte(userID)
+	         headers := []kafka.Header{
+		           {Key: "schema",      Value: []byte("ipang.qa.v1")},
+		           {Key: "user_id",     Value: []byte(userID)},
+		           {Key: "occurred",    Value: []byte(strconv.FormatInt(occurred, 10))},
+		           {Key: "qa_pairs",    Value: []byte(strconv.Itoa(len(qas)))},
+		           {Key: "produced_at", Value: []byte(strconv.FormatInt(time.Now().Unix(), 10))},
+	         }
+
+	        // 4) 写 Kafka
+	        if err := s.recorderProducer.Produce(s.recorderTopic, key, val, headers); err != nil {
+		       // 失败兜底：打点/告警/日志；让上游重试等
+		       log.GetInstance().Sugar.Errorf("produce recorder batch failed: %v", err)
+		       return
+	        }
+        }
+
+  5.2.2 recorder 消费侧
+  // 反序列化 []ipang.QA → 拆 USER/AI → 批量入库 → ack(true)
+  package main
+
+  import (
+	  "context"
+	  "encoding/json"
+	  "strconv"
+	  "strings"
+	  "time"
+
+	  "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+
+	  "your/module/path/infrastructures/mq/kmq"
+	  "your/module/path/infrastructures/db/mysql"
+	  "your/module/path/models/recorder"
+	  "your/module/path/log"
+  )
+
+  type QA struct {
+	  Q string `json:"q"`
+	  A string `json:"a"`
+  }
+
+  func main() {
+	  ctx := context.Background()
+
+	  // --- 1) MySQL ---
+	  db, err := mysql.Open(mysql.Config{
+		  DSN: "user:pass@tcp(mysql:3306)/qywx?parseTime=true&loc=UTC&charset=utf8mb4",
+		  // 连接池参数...
+	  })
+	  if err != nil { panic(err) }
+	  repo := &Repo{db: db} // 见上文
+
+	  // --- 2) DLQ（可选但强烈建议） ---
+	  dlq, err := kmq.NewDLQ(conf.Kafka.Brokers, "qywx-recorder", conf.Kafka.DLQTopic)
+	  if err != nil { log.GetInstance().Sugar.Warnf("init DLQ failed: %v", err) }
+
+	  // --- 3) kmq.Consumer ---
+	  consumer, err := kmq.NewConsumer(conf.Kafka.Brokers, "qywx-recorder-group",
+		  kmq.WithMaxInflightPerPartition(128),
+		  kmq.WithBatchCommit(2*time.Second, 100),
+		  kmq.WithLifecycleHooks(kmq.LifecycleHooks{
+			  OnAssigned: func(topic string, partition int32, startOffset int64) {
+				  // 可选：记录日志/打指标
+			  },
+			  OnRevoked: func(topic string, partition int32) {
+				  // 可选：记录日志/打指标
+			  },
+		  }),
+	  )
+	  if err != nil { panic(err) }
+	  defer consumer.Close()
+
+	  if err := consumer.Subscribe([]string{"qywx-recorder.v1"}); err != nil {
+		  panic(err)
+	  }
+
+	  // --- 4) 消费循环（回调 + ack） ---
+	  handler := func(m *kafka.Message, ack func(success bool)) {
+		  // 4.1 header 读取 user_id / occurred
+		  userID := header(m.Headers, "user_id")
+		  if userID == "" {
+			  if dlq != nil { _ = dlq.SendWithContext(m, "missing_user_id_header") }
+			  ack(true) // 推进提交，避免卡分区
+			  return
+		  }
+		  occ := parseUnix(header(m.Headers, "occurred"))
+		  if occ == 0 {
+			  if !m.Timestamp.IsZero() { occ = m.Timestamp.Unix() } else { occ = time.Now().Unix() }
+		  }
+		  occurredAt := time.Unix(occ, 0).UTC()
+
+		  // 4.2 反序列化 JSON([]QA)
+		  var qas []QA
+		  if err := json.Unmarshal(m.Value, &qas); err != nil {
+			  if dlq != nil { _ = dlq.SendWithContext(m, "json_unmarshal_failed") }
+			  ack(true)
+			  return
+		  }
+
+		  // 4.3 拆 USER/AI 记录（忽略空白）
+		  rows := make([]recorder.ConversationRecord, 0, 2*len(qas))
+		  for _, qa := range qas {
+			  if s := strings.TrimSpace(qa.Q); s != "" {
+				  rows = append(rows, recorder.ConversationRecord{
+					  UserID:   userID,
+					  Source:   "USER",
+					  Content:  s,
+					  Occurred: occurredAt,
+				  })
+			  }
+			  if s := strings.TrimSpace(qa.A); s != "" {
+				  rows = append(rows, recorder.ConversationRecord{
+					  UserID:   userID,
+					  Source:   "AI",
+					  Content:  s,
+					  Occurred: occurredAt,
+				  })
+			  }
+		  }
+		  if len(rows) == 0 { ack(true); return }
+
+		  // 4.4 批量入库（幂等）
+		  if err := repo.InsertBatch(ctx, rows, 300); err != nil {
+			  // 可做短暂重试；仍失败 → DLQ → 推进提交
+			  if dlq != nil { _ = dlq.SendWithContext(m, "mysql_write_failed:"+err.Error()) }
+			  ack(true)
+			  return
+		  }
+
+		  // 4.5 成功 → 提交
+		  ack(true)
+	  }
+
+	  // 轮询 + 分区内 Gate 连续提交（kmq 内部已实现 Gate + 批量提交管理）
+	  consumer.PollAndDispatchWithAck(handler, 100) // pollMs = 100
+}
+
+  // 小工具
+  func header(hs []kafka.Header, key string) string {
+	  for _, h := range hs {
+		  if strings.EqualFold(h.Key, key) { return string(h.Value) }
+	  }
+	  return ""
+  }
+  func parseUnix(s string) int64 {
+	  if s == "" { return 0 }
+	  v, _ := strconv.ParseInt(s, 10, 64)
+	  return v
+  }
+
+
+
+6) infrastructures/db/mysql 封装（GORM v2）
+
+type Config struct {
+    DSN              string
+    MaxOpenConns     int
+    MaxIdleConns     int
+    ConnMaxIdle      time.Duration
+    ConnMaxLifetime  time.Duration
+}
+
+func Open(cfg Config) (*gorm.DB, error) {
+    db, err := gorm.Open(mysql.Open(cfg.DSN), &gorm.Config{
+        PrepareStmt:            true,
+        SkipDefaultTransaction: true,
+    })
+    if err != nil { return nil, err }
+    sqlDB, _ := db.DB()
+    sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
+    sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
+    sqlDB.SetConnMaxIdleTime(cfg.ConnMaxIdle)
+    sqlDB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+    return db, nil
+}
+
+7) kafka 配置
+
+7.1 recorder 生产端（给 qywx-recorder 发消息）
+
+[kafka.producer.recorder]
+clientId = "qywx-producer-recorder"
+acks = "all"
+enableIdempotence = true
+messageSendMaxRetries = 10
+messageTimeoutMs = 30000
+lingerMs = 10
+batchNumMessages = 1000
+queueBufferingMaxMs = 50
+queueBufferingMaxKbytes = 102400
+compressionType = "lz4"
+socketKeepaliveEnable = true
+connectionsMaxIdleMs = 300000
+statisticsIntervalMs = 60000
+goDeliveryReportFields = "key,value,headers"
+partitioner = "murmur2_random"
+
+# ——【关键：维度① Producer 发送阈值】——
+messageMaxBytes = 6291456
+
+
+7.2 recorder 消费端（app/recorder 订阅并入库）
+
+[kafka.consumer.recorder]
+debug = "conf"
+groupId = "qywx-recorder-group"
+partitionAssignmentStrategy = "cooperative-sticky"
+enableAutoCommit = false
+enableAutoOffsetStore = false
+autoOffsetReset = "earliest"
+sessionTimeoutMs = 30000
+heartbeatIntervalMs = 3000
+maxPollIntervalMs = 600000
+fetchMinBytes = 1024
+fetchWaitMaxMs = 50
+statisticsIntervalMs = 60000
+socketKeepaliveEnable = true
+
+# ——【关键：维度④ Consumer 拉取阈值】——
+maxPartitionFetchBytes = 6291456   # 单分区一次最多拉取，需 ≥ 单条消息上限
+fetchMaxBytes = 67108864           # 单次请求总量（多分区聚合），取 64MiB
+
+7.3 主题配置
+
+[kafka.topic.recorder]
+name = "qywx-recorder"
+numPartitions = 24
+replicationFactor = 3
+cleanupPolicy = "delete"
+retentionMs = 604800000
+# ——【关键：维度② Topic 接纳阈值】——
+maxMessageBytes = 6291456
+
+7.4 topic CLI
+
+7.4.1 主题不存在时
+
+kafka-topics \
+  --bootstrap-server <BOOTSTRAP> \
+  --create \
+  --topic qywx-recorder \
+  --partitions 24 \
+  --replication-factor 3 \
+  --config cleanup.policy=delete \
+  --config retention.ms=604800000 \
+  --config max.message.bytes=6291456
+
+说明：--config 可重复写多次，创建时直接写入主题级配置。
+
+7.4.2 主题已存在时
+
+7.4.2.1 覆盖/补齐主题级配置（delete/retention/max.message.bytes）
+
+kafka-configs \
+  --bootstrap-server <BOOTSTRAP> \
+  --alter \
+  --entity-type topics \
+  --entity-name qywx-recorder \
+  --add-config cleanup.policy=delete,retention.ms=604800000,max.message.bytes=6291456
+
+7.4.2.2 扩分区到 24（只能增加，不能减少）
+
+kafka-topics \
+  --bootstrap-server <BOOTSTRAP> \
+  --alter \
+  --topic qywx-recorder \
+  --partitions 24
+
+7.4.3 验证
+
+7.4.3.1 查看主题元信息（分区/副本因子/Leader 等）
+
+kafka-topics \
+  --bootstrap-server <BOOTSTRAP> \
+  --describe \
+  --topic qywx-recorder
+
+7.4.3.2 查看生效中的主题配置（过滤关键项）
+
+kafka-configs \
+  --bootstrap-server <BOOTSTRAP> \
+  --describe \
+  --entity-type topics \
+  --entity-name qywx-recorder | egrep 'cleanup.policy|max.message.bytes|retention.ms'
+
+
+8) 观测（可选，但建议）
+TODO
+
+9）目录建议（关键文件）
+
+app/recorder/
+  main.go                 // 读取配置、初始化 Prom、MySQL、Kafka、启动消费者
+  consumer.go             // 订阅循环、分区管理、Gate 并发提交
+  handler.go              // 反序列化、组装记录、批量入库、DLQ
+  repo.go                 // GORM 仓储（InsertBatch）
+  types.go                // RecorderEntry / Envelope 等结构
+
+infrastructures/db/mysql/
+  mysql.go                // Open(cfg)、Migrate(db)
+
+models/recorder/
+  record.go               // ConversationRecord 模型（可放在 models/ 或 recorder/）
+
+10）监控指标
+10.1 Kafka（来自 kmq 桥接 + recorder 进程）
+
+| 指标名                                   | 类型        | 标签                 | 含义 / 触发点                                                               |              |          |      |
+| ------------------------------------- | --------- | ------------------ | ---------------------------------------------------------------------- | ------------ | -------- | ---- |
+| `qywx_recorder_consume_batch_seconds` | Histogram | `topic`            | **单条 Kafka 记录（1 轮 QAs）从收到到完成的耗时**                                      |              |          |      |
+| `qywx_recorder_batches_total`         | Counter   | `result`           | **Kafka 记录处理计数**：`ok                                                   | decode_error | db_error | dlq` |
+| `qywx_recorder_qas_total`             | Counter   |                    | **解析出的 QA 对数**（`sum(len(qas))`）                                        |              |          |      |
+
+10.2 MySQL（recorder 进程）
+
+| 指标名                                     | 类型             | 标签       | 含义 / 触发点                                     |          |                                         |
+| --------------------------------------- | -------------- | -------- | -------------------------------------------- | -------- | --------------------------------------- |
+| `qywx_recorder_db_insert_batch_seconds` | Histogram      |          | **一次批量入库的耗时**                                |          |                                         |
+| `qywx_recorder_db_insert_batches_total` | Counter        | `result` | **批次入库计数**：`ok                               | error    | retry_ok`                               |
+| `qywx_recorder_db_insert_rows_total`    | Counter        | `result` | **行计数**：`inserted                            | ignored  | error`（`ignored = 尝试行数 − RowsAffected`） |
+| `qywx_recorder_db_retry_total`          | Counter        | `reason` | **重试次数**：`timeout                            | deadlock | other`                                  |
+| `qywx_recorder_db_pool_open`            | Gauge          |          | `sql.DB.Stats().OpenConnections`             |          |                                         |
+| `qywx_recorder_db_pool_in_use`          | Gauge          |          | `InUse`                                      |          |                                         |
+| `qywx_recorder_db_pool_idle`            | Gauge          |          | `Idle`                                       |          |                                         |
+| `qywx_recorder_db_wait_count`           | Counter/Gauge† |          | `WaitCount`（可做 Gauge 原值或在进程内做**增量 Counter**） |          |                                         |
+| `qywx_recorder_db_wait_seconds`         | Counter/Gauge† |          | `WaitDuration`（秒）                            |          |                                         |
+
+10.3 埋点位置与调用顺序
+
+10.3.1 Kafka 消费回调（每条 Kafka 记录，即“一轮 QAs”）
+  10.3.1.1 开始：t0 := time.Now()
+  10.3.1.2 解析 Header：读取 user_id、occurred（缺省用 m.Timestamp 或 time.Now()）；若缺失 user_id → qywx_recorder_batches_total{result="decode_error"} + ack(true)。
+  10.3.1.3 反序列化 []QA：失败 → decode_error + ack(true)；成功后 qywx_recorder_qas_total.Add(len(qas))。
+  10.3.1.4 转成行记录（USER/AI 各一条，忽略空白）。
+  10.3.1.5 批量入库：计时 db_t0 := time.Now()；执行 repo；
+    - 成功：
+      - qywx_recorder_db_insert_batch_seconds.Observe(...)
+      - qywx_recorder_db_insert_batches_total{result="ok"}.Inc()
+      - qywx_recorder_db_insert_rows_total{inserted}.Add(rowsAffected)
+      - qywx_recorder_db_insert_rows_total{ignored}.Add(len(rows)-rowsAffected)
+
+    - 可重试→成功：结果额外记 retry_ok、retry_total{reason}
+
+    - 最终失败：qywx_recorder_db_insert_batches_total{result="error"}.Inc() + qywx_recorder_db_insert_rows_total{error}.Add(len(rows))
+
+  10.3.1.6 提交：ack(true)；
+  10.3.1.7 收尾：qywx_recorder_consume_batch_seconds.Observe(time.Since(t0).Seconds())；qywx_recorder_batches_total{result="ok"}.Inc()（或对应错误分支）。
+           连续提交由 kmq 的 PartitionCommitGate 保证；你只需在成功/不可恢复失败后调用 ack(true)。
+
+10.4 Prometheus 指标定义（示例代码）
+可以把下面这段放在 observe/prometheus/recorder.go
+
+var (
+    // Kafka (kmq bridge + recorder 自身)
+    RecorderConsumeBatchSeconds = prometheus.NewHistogramVec(
+        prometheus.HistogramOpts{
+            Namespace: "qywx", Subsystem: "recorder",
+            Name: "consume_batch_seconds",
+            Help: "End-to-end latency to process one Kafka record (one round of QAs).",
+        }, []string{"topic"},
+    )
+    RecorderBatchesTotal = prometheus.NewCounterVec(
+        prometheus.CounterOpts{
+            Namespace: "qywx", Subsystem: "recorder",
+            Name: "batches_total", Help: "Kafka records processed by result.",
+        }, []string{"result"}, // ok|decode_error|db_error|dlq
+    )
+    RecorderQAsTotal = prometheus.NewCounter(
+        prometheus.CounterOpts{
+            Namespace: "qywx", Subsystem: "recorder",
+            Name: "qas_total", Help: "Total QA pairs parsed from Kafka records.",
+        },
+    )
+
+    // DB
+    RecorderDBInsertBatchSeconds = prometheus.NewHistogram(
+        prometheus.HistogramOpts{
+            Namespace: "qywx", Subsystem: "recorder",
+            Name: "db_insert_batch_seconds",
+            Help: "Latency of one DB batch insert.",
+            Buckets: []float64{0.005,0.01,0.02,0.05,0.1,0.2,0.5,1,2,5},
+        },
+    )
+    RecorderDBInsertBatchesTotal = prometheus.NewCounterVec(
+        prometheus.CounterOpts{
+            Namespace: "qywx", Subsystem: "recorder",
+            Name: "db_insert_batches_total",
+            Help: "DB insert batches by result.",
+        }, []string{"result"}, // ok|error|retry_ok
+    )
+    RecorderDBInsertRowsTotal = prometheus.NewCounterVec(
+        prometheus.CounterOpts{
+            Namespace: "qywx", Subsystem: "recorder",
+            Name: "db_insert_rows_total",
+            Help: "Rows attempted outcome.",
+        }, []string{"result"}, // inserted|ignored|error
+    )
+    RecorderDBRetryTotal = prometheus.NewCounterVec(
+        prometheus.CounterOpts{
+            Namespace: "qywx", Subsystem: "recorder",
+            Name: "db_retry_total",
+            Help: "DB retry attempts by reason.",
+        }, []string{"reason"}, // timeout|deadlock|other
+    )
+    // 连接池
+    RecorderDBPoolOpen = prometheus.NewGauge(prometheus.GaugeOpts{
+        Namespace: "qywx", Subsystem: "recorder", Name: "db_pool_open",
+        Help: "sql.DB OpenConnections.",
+    })
+    RecorderDBPoolInUse = prometheus.NewGauge(prometheus.GaugeOpts{
+        Namespace: "qywx", Subsystem: "recorder", Name: "db_pool_in_use",
+        Help: "sql.DB InUse.",
+    })
+    RecorderDBPoolIdle = prometheus.NewGauge(prometheus.GaugeOpts{
+        Namespace: "qywx", Subsystem: "recorder", Name: "db_pool_idle",
+        Help: "sql.DB Idle.",
+    })
+    RecorderDBWaitCount = prometheus.NewGauge(prometheus.GaugeOpts{
+        Namespace: "qywx", Subsystem: "recorder", Name: "db_wait_count",
+        Help: "sql.DB WaitCount (cumulative).",
+    })
+    RecorderDBWaitSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+        Namespace: "qywx", Subsystem: "recorder", Name: "db_wait_seconds",
+        Help: "sql.DB WaitDuration in seconds (cumulative).",
+    })
+)
+
+注册：
+
+
+10.5 业务代码中如何埋点（关键位置）
+
+10.5.1 埋点逻辑
+
+func handler(m *kafka.Message, ack func(bool)) {
+    t0 := time.Now()
+    topic := *m.TopicPartition.Topic
+
+    // 1) 读取 header
+    userID := header(m.Headers, "user_id")
+    occ := parseUnix(header(m.Headers, "occurred"))
+    if userID == "" {
+        RecorderBatchesTotal.WithLabelValues("decode_error").Inc()
+        ack(true); return
+    }
+    if occ == 0 {
+        if !m.Timestamp.IsZero() { occ = m.Timestamp.Unix() } else { occ = time.Now().Unix() }
+    }
+
+    // 2) 反序列化
+    var qas []QA
+    if err := json.Unmarshal(m.Value, &qas); err != nil {
+        RecorderBatchesTotal.WithLabelValues("decode_error").Inc()
+        ack(true); return
+    }
+    RecorderQAsTotal.Add(float64(len(qas)))
+
+    // 3) 转行
+    rows := buildRows(userID, time.Unix(occ,0).UTC(), qas)
+    if len(rows) == 0 { RecorderBatchesTotal.WithLabelValues("ok").Inc(); ack(true); return }
+
+    // 4) DB 批量入库（重试封装内自行统计 RecorderDBRetryTotal）
+    dbt := time.Now()
+    ra, ignored, err := repo.InsertBatchWithStats(ctx, rows, 300) // 返回 RowsAffected / Ignored 行数
+    RecorderDBInsertBatchSeconds.Observe(time.Since(dbt).Seconds())
+    if err != nil {
+        RecorderDBInsertBatchesTotal.WithLabelValues("error").Inc()
+        RecorderDBInsertRowsTotal.WithLabelValues("error").Add(float64(len(rows)))
+        RecorderBatchesTotal.WithLabelValues("db_error").Inc()
+        ack(true); return
+    }
+    RecorderDBInsertBatchesTotal.WithLabelValues("ok").Inc()
+    RecorderDBInsertRowsTotal.WithLabelValues("inserted").Add(float64(ra))
+    RecorderDBInsertRowsTotal.WithLabelValues("ignored").Add(float64(ignored))
+
+    // 5) 提交 + 批耗时
+    ack(true)
+    RecorderConsumeBatchSeconds.WithLabelValues(topic).Observe(time.Since(t0).Seconds())
+    RecorderBatchesTotal.WithLabelValues("ok").Inc()
+}
+
+10.5.2 recorder metrics 定义 (app/recorder/metrics.go)
+
+参考实现：
+
+// 文件：app/recorder/metrics.go
+package recorder
+
+import (
+	"sync/atomic"
+	"time"
+)
+
+// Hooks defines optional callbacks for recorder observability.
+// Prom 包通过 WithHooks 注入具体实现；recorder 自身不依赖 Prometheus。
+type Hooks struct {
+	// ===== 业务消费相关 =====
+	// 单条 Kafka 记录（1 轮 QAs）处理耗时
+	OnConsumeLatency func(topic string, latency time.Duration)
+	// 处理结果：ok / decode_error / db_error / dlq
+	OnBatchResult func(result string)
+	// 解析出的 QA 个数（每条记录上报 sum(len(qas))）
+	OnQAs func(count int)
+
+	// ===== DB：批量入库 =====
+	// 一次批量入库的耗时 + 结果 + 行计数拆分
+	// result: ok | error | retry_ok
+	// rowsInserted: 成功插入的行数（= RowsAffected）
+	// rowsIgnored:  忽略的行数（见 ReportDBInsertBatchFromAttempt 的计算）
+	// rowsError:    错误的行数（本次批量中失败的行）
+	OnDBInsertBatch func(latency time.Duration, result string, rowsInserted, rowsIgnored, rowsError int)
+
+	// DB 重试计数（单次重试上报一次）
+	// reason: timeout | deadlock | other
+	OnDBRetry func(reason string)
+
+	// DB 连接池状态（从 sql.DB.Stats() 映射）
+	OnDBPoolStats func(stats DBPoolStats)
+}
+
+var injectedHooks atomic.Value
+
+func init() {
+	injectedHooks.Store(Hooks{})
+}
+
+// WithHooks installs the given hooks for recorder metrics.
+func WithHooks(h Hooks) {
+	injectedHooks.Store(h)
+}
+
+func currentHooks() Hooks {
+	if v := injectedHooks.Load(); v != nil {
+		if h, ok := v.(Hooks); ok {
+			return h
+		}
+	}
+	return Hooks{}
+}
+
+// ===== 业务消费：上报函数 =====
+
+func ReportConsumeLatency(topic string, latency time.Duration) {
+	if cb := currentHooks().OnConsumeLatency; cb != nil {
+		cb(topic, latency)
+	}
+}
+
+func ReportBatchResult(result string) {
+	if cb := currentHooks().OnBatchResult; cb != nil {
+		cb(result)
+	}
+}
+
+func ReportQAs(count int) {
+	if cb := currentHooks().OnQAs; cb != nil {
+		cb(count)
+	}
+}
+
+//（可选）统一的结果常量，避免魔法字符串
+const (
+	ResultOK          = "ok"
+	ResultDecodeError = "decode_error"
+	ResultDBError     = "db_error"
+	ResultDLQ         = "dlq"
+)
+
+// ===== DB：上报函数 =====
+
+// ReportDBInsertBatch 直接上报一次批量入库的观测数据。
+// - latency: 本次批量入库耗时
+// - result:  "ok" | "error" | "retry_ok"
+// - rowsInserted / rowsIgnored / rowsError: 行级计数拆分
+func ReportDBInsertBatch(latency time.Duration, result string, rowsInserted, rowsIgnored, rowsError int) {
+	if cb := currentHooks().OnDBInsertBatch; cb != nil {
+		cb(latency, result, rowsInserted, rowsIgnored, rowsError)
+	}
+}
+
+// ReportDBInsertBatchFromAttempt 是一个便捷函数：基于「尝试行数 / RowsAffected / 错误行数」推导 ignored 并上报。
+// 约定：ignored = attempts - rowsAffected - errorRows（确保三项之和等于 attempts）
+// 注意：若计算出负值会被截断为 0，避免异常上报。
+func ReportDBInsertBatchFromAttempt(latency time.Duration, result string, attempts, rowsAffected, errorRows int) {
+	ignored := attempts - rowsAffected - errorRows
+	if ignored < 0 {
+		ignored = 0
+	}
+	if rowsAffected < 0 {
+		rowsAffected = 0
+	}
+	if errorRows < 0 {
+		errorRows = 0
+	}
+	ReportDBInsertBatch(latency, result, rowsAffected, ignored, errorRows)
+}
+
+// ReportDBRetry 上报一次 DB 重试（reason: "timeout" | "deadlock" | "other"）。
+func ReportDBRetry(reason string) {
+	if cb := currentHooks().OnDBRetry; cb != nil {
+		cb(reason)
+	}
+}
+
+// DBPoolStats 适配 sql.DB.Stats() 到我们关心的字段。
+type DBPoolStats struct {
+	Open        int           // OpenConnections
+	InUse       int           // InUse
+	Idle        int           // Idle
+	WaitCount   int64         // WaitCount (累计)
+	WaitDuration time.Duration // WaitDuration (累计)
+}
+
+// ReportDBPoolStats 直接 set 连接池相关指标（建议以固定周期采集，如 5s/10s）。
+func ReportDBPoolStats(stats DBPoolStats) {
+	if cb := currentHooks().OnDBPoolStats; cb != nil {
+		cb(stats)
+	}
+}
+
+// （可选）DB 结果/重试原因常量，统一标签取值
+const (
+	DBInsertResultOK      = "ok"
+	DBInsertResultError   = "error"
+	DBInsertResultRetryOK = "retry_ok"
+
+	DBRetryReasonTimeout  = "timeout"
+	DBRetryReasonDeadlock = "deadlock"
+	DBRetryReasonOther    = "other"
+)
+
+
+10.5.3 recorder hook 定义 （observe/prometheus/recorder_hooks.go）
+
+示意代码：
+
+// 文件：observe/prometheus/recorder_hooks.go
+package prom
+
+import (
+	"time"
+
+	"qywx/app/recorder"
+)
+
+// InstallRecorderHooks wires Prometheus metrics with recorder observability callbacks.
+// 注：需在 prom.MustRegisterAll() 中调用本函数，以完成 hooks 安装。
+func InstallRecorderHooks() {
+	recorder.WithHooks(recorder.Hooks{
+		// ===== 业务消费相关 =====
+		OnConsumeLatency: func(topic string, latency time.Duration) {
+			RecorderConsumeBatchSeconds.
+				WithLabelValues(labelOr(topic, "unknown")).
+				Observe(latency.Seconds())
+		},
+		OnBatchResult: func(result string) {
+			RecorderBatchesTotal.
+				WithLabelValues(labelOr(result, "unknown")).
+				Inc()
+		},
+		OnQAs: func(count int) {
+			if count > 0 {
+				RecorderQAsTotal.Add(float64(count))
+			}
+		},
+
+		// ===== DB：批量入库 =====
+		//
+		// - qywx_recorder_db_insert_batch_seconds (Histogram 无标签)
+		// - qywx_recorder_db_insert_batches_total{result} (ok|error|retry_ok)
+		// - qywx_recorder_db_insert_rows_total{result} (inserted|ignored|error)
+		OnDBInsertBatch: func(latency time.Duration, result string, rowsInserted, rowsIgnored, rowsError int) {
+			// 批次耗时
+			RecorderDBInsertBatchSeconds.Observe(latency.Seconds())
+
+			// 批次结果
+			RecorderDBInsertBatchesTotal.
+				WithLabelValues(labelOr(result, "unknown")).
+				Inc()
+
+			// 行结果拆分
+			if rowsInserted > 0 {
+				RecorderDBInsertRowsTotal.
+					WithLabelValues("inserted").
+					Add(float64(rowsInserted))
+			}
+			if rowsIgnored > 0 {
+				RecorderDBInsertRowsTotal.
+					WithLabelValues("ignored").
+					Add(float64(rowsIgnored))
+			}
+			if rowsError > 0 {
+				RecorderDBInsertRowsTotal.
+					WithLabelValues("error").
+					Add(float64(rowsError))
+			}
+		},
+
+		// ===== DB：重试计数 =====
+		//
+		// - qywx_recorder_db_retry_total{reason} (timeout|deadlock|other)
+		OnDBRetry: func(reason string) {
+			RecorderDBRetryTotal.
+				WithLabelValues(labelOr(reason, "other")).
+				Inc()
+		},
+
+		// ===== DB：连接池指标（直接 set 原值，Stats 为累计量）=====
+		//
+		// - qywx_recorder_db_pool_open
+		// - qywx_recorder_db_pool_in_use
+		// - qywx_recorder_db_pool_idle
+		// - qywx_recorder_db_wait_count
+		// - qywx_recorder_db_wait_seconds
+		OnDBPoolStats: func(stats recorder.DBPoolStats) {
+			RecorderDBPoolOpen.Set(float64(stats.Open))
+			RecorderDBPoolInUse.Set(float64(stats.InUse))
+			RecorderDBPoolIdle.Set(float64(stats.Idle))
+			RecorderDBWaitCount.Set(float64(stats.WaitCount))
+			RecorderDBWaitSeconds.Set(stats.WaitDuration.Seconds())
+		},
+	})
+}
+
+10.5.4 周期更新连接池 （app/recorder/dbpool_stats.go）
+
+10.5.4.1 示意代码：
+
+package recorder
+
+import (
+	"context"
+	"database/sql"
+	"time"
+)
+
+// StartDBPoolStatsReporter 周期读取 sql.DB.Stats() 并通过 Hook 上报。
+// 返回 stop 函数用于终止。
+func StartDBPoolStatsReporter(parent context.Context, db *sql.DB, interval time.Duration) (stop func()) {
+	if db == nil {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	ctx, cancel := context.WithCancel(parent)
+
+	reportOnce := func() {
+		s := db.Stats()
+		ReportDBPoolStats(DBPoolStats{
+			Open:         s.OpenConnections,
+			InUse:        s.InUse,
+			Idle:         s.Idle,
+			WaitCount:    s.WaitCount,
+			WaitDuration: s.WaitDuration,
+		})
+	}
+
+	// 立即采样一次
+	reportOnce()
+
+	tk := time.NewTicker(interval)
+	go func() {
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				reportOnce()
+			}
+		}
+	}()
+	return cancel
+}
+
+10.5.4.2 在应用启动处调用：
+
+示意代码：
+
+prom.MustRegisterAll()            // 确保安装了 InstallRecorderHooks()
+db, _ := sql.Open("mysql", cfg.DSN)
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+stopPool := recorder.StartDBPoolStatsReporter(ctx, db, 10*time.Second)
+defer stopPool()
+
+
+

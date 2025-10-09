@@ -1,0 +1,88 @@
+消息队列压测设计
+
+引入一个专门用于压测的微服务（app/stress）。
+
+1. infrastructures/config 引入一个新的配置项：stress  默认值 false, 设为 true 代表处于压测模式
+2. 以 userId : wm6Gh8CQAAsJJJC8czVaRraSVQEWIzSw 为模板，随机产生 1000个 userId 备用
+3. app/producer 引入一个用于压测的端点：/stress Post方法
+   3.1 核心逻辑参考 controllers/message.go 里处理 case wxsuite.KFMsgOrEvent:
+
+   if err := DeliverCallback(ctx.Request.Context(), callbackEvent); err != nil {
+				log.GetInstance().Sugar.Errorf("deliver kf callback failed: %v", err)
+				replyWithError(ctx, common.HandleSuiteMsgErr, err.Error())
+				return
+			}
+	replyWithOK(ctx)
+   
+   3.2 构造 kefu.KFCallbackMessage：
+       ToUserName: 固定值 - "wk6Gh8CQAAH3T-AxpjWbx8Ybhw84AFnQ"
+       CreateTime: Unix时间戳，取当前时间，注意时区设为东八区
+       MsgType: 固定值 - "event"
+       Event: 固定值 - "kf_msg_or_event"
+       Token: 随机生成长度为10的字符串
+       OpenKFID: 固定值 - "wk6Gh8CQAAH3T-AxpjWbx8Ybhw84AFnQ"
+4. 实现函数 func (s *KFService) handleWithCursorStore(ctx context.Context, event *kefu.KFCallbackMessage, epoch int64) error 的变种：
+   handleWithStress(ctx context.Context, event *kefu.KFCallbackMessage, epoch int64) error
+   它全程不Touch操作Cursor的逻辑，而是直接生成模拟的用户消息：
+   4.1 生成 infrastructures/wxmsg/kefu/kefu.go 里的 type KFRecvMessage struct
+       MsgID：设计成整数形式，对同一个用户，一直自增下去
+       OpenKFID: 固定值 - "wk6Gh8CQAAH3T-AxpjWbx8Ybhw84AFnQ"
+       ExternalUserID: 从 2.1 产生的 userId 选择一个，每次调用 /stress 端点都要选择一个新的userId, 每1000次调用重复一轮
+       SendTime： unix时间戳，取当前时间
+       Origin：固定值 - 3
+       ServicerUserID：固定为空 ""
+       MsgType: 固定值 - "text"
+       Text: 
+             Content: 随机生成50个汉字
+             MenuID: 固定为空 ""
+       Image， Voice， Video，File，Location，Link， Event： 固定值 - nil
+    4.2 这样的用户消息一次生成1000条，每一条的ExternalUserID对应步骤2里的一个userId, 把这些消息挂到
+    4.3 构建 KFSyncMsgResponse
+        ErrCode: 固定值 - 0
+        ErrMsg: 固定为空
+        NextCursor: 固定为空 （我们不需要）
+        HasMore: 固定值 - 0
+        MsgList: 挂载 3.2 生成的消息列表
+    4.4  函数的核心逻辑：
+    handleWithStress(ctx context.Context, event *kefu.KFCallbackMessage, epoch int64) error {
+         if ctx == nil {
+		     ctx = context.Background()
+	     }
+	     log.GetInstance().Sugar.Infof("Processing KF event with fetcher: Token=%s, OpenKFID=%s, epoch=%d", event.Token, event.OpenKFID, epoch)
+	     appID := s.appID()
+         pullStart := time.Now()
+	     resp := kefu.SimulateKFMessages()
+	     if err != nil {
+		     ReportError(appID, errorStageSyncMessages)
+		     return fmt.Errorf("sync messages failed: %w", err)
+	     }
+	     fetcher.ReportPullBatch(s.shadowAppID, time.Since(pullStart), len(resp.MsgList))
+	     log.GetInstance().Sugar.Infof("Synced %d messages for OpenKFID=%s", len(resp.MsgList), event.OpenKFID)
+
+	     for _, msg := range resp.MsgList {
+		    msgCopy := msg
+		    msgType := messageTypeLabel(&msg)
+		    source := messageSourceLabel(&msg)
+		    msgStart := time.Now()
+		    if err := s.kafkaProducer.ProduceKFMessage(&msgCopy); err != nil {
+			    log.GetInstance().Sugar.Errorf("Failed to produce message to Kafka: %v", err)
+			    ReportError(appID, errorStageProduceKafka)
+		    }
+		    ReportMessage(appID, msgType, source)
+		    ReportHandleLatency(appID, msgType, time.Since(msgStart))
+	     }
+	     fetcher.ReportFanout(s.shadowAppID, len(resp.MsgList))
+         return nil
+    }
+
+5. func (s *KFService) HandleCallback(ctx context.Context, event *kefu.KFCallbackMessage, epoch int64) error 读取当前的配置，如果是处于stress test模式，调用 handleWithStress
+6. 引入新的监控指标，对应消息不连续的错误，指标应该包括：
+   6.1 userID
+   6.2 发生不连续时的序列值
+7. models/schedule/processor.go 引入一个新的函数：processStressMessage, 它不用处理任何业务逻辑, 而是：
+   7.1 只检查消息的MsgID, 判断是否是连续的，如果不是，用第6步定义的指标，上报Promethus，并且记录错误日志
+   7.2 sleep 3秒，模拟业务处理耗时
+8. func (p *Processor) run() 读取config，如果处于stress test模式，调用 processStressMessage
+9. stress的主程序用 shell 脚本实现，利用 curl 工具调用 /stress 端点
+
+
