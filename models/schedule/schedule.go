@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"qywx/infrastructures/common"
@@ -60,6 +61,9 @@ type Scheduler struct {
 	mqRuntime        *msgqueue.KafkaRuntime
 	recorderProducer RecorderProducer // Recorder Kafka Producer
 	recorderTopic    string           // Recorder Topic名称
+
+	// 消息分发计数器（原子操作，线程安全）
+	dispatchCount atomic.Int64
 }
 
 // Processor 用户消息处理器
@@ -315,6 +319,12 @@ func (s *Scheduler) dispatcher() {
 
 // DispatchInbound 将消息交给用户级 processor，供 Kafka runtime 复用。
 func (s *Scheduler) DispatchInbound(in *message.InboundMsg) {
+	// 开始计时：记录消息分发开始时间
+	startTime := time.Now()
+
+	// 递增消息分发计数器
+	count := s.dispatchCount.Add(1)
+
 	if in == nil {
 		return
 	}
@@ -359,9 +369,15 @@ func (s *Scheduler) DispatchInbound(in *message.InboundMsg) {
 		case processor.resetTimer <- struct{}{}:
 		default:
 		}
-		log.GetInstance().Sugar.Debug("Inbound dispatched to processor for user: ", msg.ExternalUserID, ", type: ", msg.MsgType)
+		// 结束计时：消息成功分发
+		elapsed := time.Since(startTime)
+		log.GetInstance().Sugar.Debugf("消息分发成功: count=%d, user=%s, type=%s, elapsed=%v",
+			count, msg.ExternalUserID, msg.MsgType, elapsed)
 	case <-time.After(1 * time.Second):
-		log.GetInstance().Sugar.Warn("Failed to send inbound to processor, channel full: ", msg.ExternalUserID)
+		// 结束计时：消息分发超时
+		elapsed := time.Since(startTime)
+		log.GetInstance().Sugar.Warnf("消息分发超时: count=%d, user=%s, elapsed=%v",
+			count, msg.ExternalUserID, elapsed)
 		if in.Ack != nil {
 			in.Ack(false)
 		}

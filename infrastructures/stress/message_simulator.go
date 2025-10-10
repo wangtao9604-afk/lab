@@ -8,8 +8,8 @@ import (
 
 const (
 	// 消息生成常量
-	messageBatchSize  = 100 // 每批生成 1000 条消息
-	textContentLength = 50  // 每条消息 50 个汉字
+	messageBatchSize  = 1000 // 每批生成 1000 条消息
+	textContentLength = 50   // 每条消息 50 个汉字
 )
 
 // cst8 在 message_builder.go 中定义并共享

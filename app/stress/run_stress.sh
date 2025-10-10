@@ -61,16 +61,6 @@ send_request() {
     fi
 }
 
-# Reset MsgID counters before starting
-echo -e "${YELLOW}Resetting MsgID counters...${NC}"
-RESET_URL="${PRODUCER_URL}/reset"
-if curl -s -X POST "$RESET_URL" -o /dev/null; then
-    echo -e "${GREEN}✓ MsgID counters reset${NC}"
-else
-    echo -e "${YELLOW}⚠ Failed to reset counters (continuing anyway)${NC}"
-fi
-echo ""
-
 # Main stress test loop
 echo -e "${GREEN}Starting stress test...${NC}"
 echo ""

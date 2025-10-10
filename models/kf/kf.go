@@ -40,6 +40,7 @@ type KFService struct {
 	cursorState      *cursorRuntime
 	shadowAppID      string
 	shadowPath       string
+	stressMu         sync.Mutex // 压测模式串行执行
 }
 
 const RawKafkaTopic = "wx_raw_event"
@@ -818,6 +819,9 @@ func (s *KFService) handleWithCursorManager(event *kefu.KFCallbackMessage, cm *c
 // handleWithStress 压测模式下的消息处理
 // 不触碰 Cursor 逻辑，直接生成模拟消息并发送到 Kafka
 func (s *KFService) handleWithStress(ctx context.Context, event *kefu.KFCallbackMessage, epoch int64) error {
+	s.stressMu.Lock()
+	defer s.stressMu.Unlock()
+
 	if ctx == nil {
 		ctx = context.Background()
 	}

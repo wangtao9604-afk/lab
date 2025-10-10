@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	qconfig "qywx/infrastructures/config"
@@ -45,6 +46,9 @@ type Consumer struct {
 	partitionInflightMu sync.Mutex
 
 	groupID string
+
+	// 消息拉取计数器（原子操作，线程安全）
+	messageCount atomic.Int64
 }
 
 // ConsumerOptions 控制消费并发及批量提交参数。
@@ -655,6 +659,12 @@ func (cc *Consumer) PollAndDispatchWithAck(ctx context.Context, handler AsyncMes
 
 		switch e := ev.(type) {
 		case *kafka.Message:
+			// 开始计时：记录消息拉取开始时间
+			startTime := time.Now()
+
+			// 递增消息计数器
+			count := cc.messageCount.Add(1)
+
 			part := e.TopicPartition.Partition
 			topic := *e.TopicPartition.Topic
 			off := int64(e.TopicPartition.Offset)
@@ -686,6 +696,11 @@ func (cc *Consumer) PollAndDispatchWithAck(ctx context.Context, handler AsyncMes
 			}
 
 			go handler(e, ack)
+
+			// 结束计时：记录消息拉取总耗时及计数
+			elapsed := time.Since(startTime)
+			qlog.GetInstance().Sugar.Debugf("消息拉取耗时: count=%d, topic=%s, partition=%d, offset=%d, elapsed=%v",
+				count, topic, part, off, elapsed)
 
 		case kafka.Error:
 			qlog.GetInstance().Sugar.Warnf("Kafka 错误事件: %v", e)

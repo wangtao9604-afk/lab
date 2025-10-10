@@ -28,17 +28,17 @@ func (c *SequenceChecker) Check(userID string, msgID string) error {
 		return fmt.Errorf("invalid msgID format: %s (not an integer)", msgID)
 	}
 
-	// 首次调用：初始化
-	if !c.initialized.Load() {
+	// 首次调用：初始化期望值为当前实际序号
+	if c.initialized.CompareAndSwap(false, true) {
 		c.userID = userID
 		c.expectedSeq.Store(actualSeq)
-		c.initialized.Store(true)
 	}
 
 	// 读取期望值
 	expectedSeq := c.expectedSeq.Load()
 
 	if actualSeq != expectedSeq {
+		c.expectedSeq.Store(actualSeq + 1)
 		// 顺序违规：期望值和实际值不匹配
 		return &SequenceViolation{
 			UserID:      userID,
@@ -48,7 +48,7 @@ func (c *SequenceChecker) Check(userID string, msgID string) error {
 	}
 
 	// 更新下一个期望值
-	c.expectedSeq.Store(actualSeq + 1)
+	c.expectedSeq.Add(1)
 	return nil
 }
 

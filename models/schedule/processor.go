@@ -2641,6 +2641,16 @@ func (p *Processor) processStressMessage(in *message.InboundMsg) error {
 	// 顺序正常
 	prom.StressMessagesProcessed.WithLabelValues("ok").Inc()
 
+	// 将消息内容投递到关键字提取队列，复用正式逻辑路径，验证单例 extractor
+	if msg.Text != nil {
+		select {
+		case p.keywordsChan <- msg.Text.Content:
+			log.GetInstance().Sugar.Debug("Enqueued stress message for keyword extraction")
+		default:
+			log.GetInstance().Sugar.Warn("Keywords channel full during stress test, skipping extraction")
+		}
+	}
+
 	// 模拟业务处理耗时 3 秒
 	time.Sleep(10 * time.Millisecond)
 

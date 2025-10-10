@@ -35,6 +35,8 @@ func main() {
 	prom.MustRegisterAll()
 	consumerHealthGauge.Set(1)
 
+	scheduler := schedule.GetInstance()
+
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
@@ -42,6 +44,14 @@ func main() {
 		consumerHealthGauge.Set(1)
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	// 压测 Stop 端点 - 仅在压测模式下注册
+	if cfg.Stress {
+		log.GetInstance().Sugar.Warn("Stress test mode enabled, /stop endpoint registered")
+		router.POST("/stop", func(c *gin.Context) {
+			handleStopRequest(c, scheduler)
+		})
+	}
 
 	httpAddr := cfg.Services.Consumer.HTTPAddr
 	if httpAddr == "" {
@@ -53,7 +63,6 @@ func main() {
 		Handler: router,
 	}
 
-	scheduler := schedule.GetInstance()
 	if err := scheduler.Start(); err != nil {
 		panic(fmt.Sprintf("failed to start scheduler: %v", err))
 	}
@@ -84,4 +93,24 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.GetInstance().Sugar.Errorf("shutdown http server: %v", err)
 	}
+}
+
+// handleStopRequest 处理停止调度器的请求（用于压测场景）
+func handleStopRequest(c *gin.Context, scheduler *schedule.Scheduler) {
+	log.GetInstance().Sugar.Info("Received stop request, stopping scheduler...")
+
+	if err := scheduler.Stop(); err != nil {
+		log.GetInstance().Sugar.Errorf("Failed to stop scheduler: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+
+	log.GetInstance().Sugar.Info("Scheduler stopped successfully")
+	c.JSON(http.StatusOK, gin.H{
+		"ok":      true,
+		"message": "Scheduler stopped successfully",
+	})
 }

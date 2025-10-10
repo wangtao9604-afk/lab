@@ -147,48 +147,52 @@ type AdvancedFieldExtractor struct {
 }
 
 // NewAdvancedFieldExtractor 创建高级字段提取器
+
+var (
+	advancedExtractorOnce sync.Once
+	advancedExtractorInst *AdvancedFieldExtractor
+)
+
 func NewAdvancedFieldExtractor() *AdvancedFieldExtractor {
-	cfg := config.GetInstance()
+	advancedExtractorOnce.Do(func() {
+		cfg := config.GetInstance()
 
-	// 初始化组件
-	dictionary := NewKeywordDictionary()
-	segmenter := NewAdvancedSegmenter()
-	nlpProcessor := NewAdvancedNLPProcessor(segmenter, dictionary)
+		dictionary := NewKeywordDictionary()
+		segmenter := NewAdvancedSegmenter()
+		nlpProcessor := NewAdvancedNLPProcessor(segmenter, dictionary)
 
-	// 初始化日志记录器
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
-	logger.SetFormatter(&logrus.JSONFormatter{
-		TimestampFormat: "2006-01-02 15:04:05",
-		FieldMap: logrus.FieldMap{
-			logrus.FieldKeyTime:  "timestamp",
-			logrus.FieldKeyLevel: "level",
-			logrus.FieldKeyMsg:   "message",
-		},
+		logger := logrus.New()
+		logger.SetLevel(logrus.InfoLevel)
+		logger.SetFormatter(&logrus.JSONFormatter{
+			TimestampFormat: "2006-01-02 15:04:05",
+			FieldMap: logrus.FieldMap{
+				logrus.FieldKeyTime:  "timestamp",
+				logrus.FieldKeyLevel: "level",
+				logrus.FieldKeyMsg:   "message",
+			},
+		})
+
+		advancedExtractorInst = &AdvancedFieldExtractor{
+			dictionary:          dictionary,
+			segmenter:           segmenter,
+			nlpProcessor:        nlpProcessor,
+			regexRules:          globalRegexRules,
+			confidenceThreshold: 0.6,
+			metrics: &ExtractionMetrics{
+				FieldExtractionRate: make(map[string]float64),
+				LastUpdated:         time.Now(),
+			},
+			logger:          logger,
+			numberUnitRegex: regexp.MustCompile(`^([\d一二两三四五六七八九十壹贰叁肆伍陆柒捌玖拾零]+)([十百千万拾佰仟萬])?`),
+			rentalFilter:    parseFilterStrategy(cfg.KeywordsConfig.RentalFilterStrategy),
+		}
+
+		advancedExtractorInst.initialized = true
+
+		logger.Info("AdvancedFieldExtractor initialized successfully")
 	})
 
-	extractor := &AdvancedFieldExtractor{
-		dictionary:          dictionary,
-		segmenter:           segmenter,
-		nlpProcessor:        nlpProcessor,
-		regexRules:          globalRegexRules, // 使用包级别初始化的正则表达式
-		confidenceThreshold: 0.6,
-		metrics: &ExtractionMetrics{
-			FieldExtractionRate: make(map[string]float64),
-			LastUpdated:         time.Now(),
-		},
-		logger: logger,
-		// Pre-compile the regex for parseNumberWithUnit (performance optimization)
-		numberUnitRegex: regexp.MustCompile(`^([\d一二两三四五六七八九十壹贰叁肆伍陆柒捌玖拾零]+)([十百千万拾佰仟萬])?`),
-		// 从配置文件读取租售过滤策略配置
-		rentalFilter: parseFilterStrategy(cfg.KeywordsConfig.RentalFilterStrategy),
-	}
-
-	extractor.initialized = true
-
-	logger.Info("AdvancedFieldExtractor initialized successfully")
-
-	return extractor
+	return advancedExtractorInst
 }
 
 // ExtractFromMessage 从消息中提取关键词和结构化数据
@@ -297,7 +301,7 @@ func (afe *AdvancedFieldExtractor) ExtractFromMessage(msg string) (result *Extra
 	}
 
 	// 9. 更新指标
-	afe.updateMetrics(result)
+	// afe.updateMetrics(result)
 
 	return result, nil
 }
@@ -632,7 +636,6 @@ func (afe *AdvancedFieldExtractor) extractFromNumbers(fields map[string]interfac
 // TODO: 统一数字标准化处理 - 此函数的逻辑应整合到nlpProcessor.NormalizeText中
 // 避免在多个地方维护类似的数字转换逻辑
 func (afe *AdvancedFieldExtractor) normalizeText(text string) string {
-
 	normalizedText := text
 
 	// 首先处理带单位的数字（如"1千平" -> "1000平"）
@@ -663,17 +666,17 @@ func (afe *AdvancedFieldExtractor) normalizeText(text string) string {
 
 	// 处理地铁线路中文数字转换 - 统一使用 common 包支持 1-99 完整覆盖
 	// 🔧 优化：用正则捕获中文数字+号线，调用 common.ConvertChineseToArabic 统一转换
-    subwayLinePattern := regexp.MustCompile(`([一二三四五六七八九十两壹贰叁肆伍陆柒捌玖拾]+)号线`)
-    normalizedText = subwayLinePattern.ReplaceAllStringFunc(normalizedText, func(match string) string {
-        // 更安全：通过分组提取中文数字部分，避免按字节切分多字节字符
-        parts := subwayLinePattern.FindStringSubmatch(match)
-        if len(parts) >= 2 {
-            chineseNumber := parts[1]
-            arabicNumber := common.ConvertChineseToArabic(chineseNumber)
-            return arabicNumber + "号线"
-        }
-        return match
-    })
+	subwayLinePattern := regexp.MustCompile(`([一二三四五六七八九十两壹贰叁肆伍陆柒捌玖拾]+)号线`)
+	normalizedText = subwayLinePattern.ReplaceAllStringFunc(normalizedText, func(match string) string {
+		// 更安全：通过分组提取中文数字部分，避免按字节切分多字节字符
+		parts := subwayLinePattern.FindStringSubmatch(match)
+		if len(parts) >= 2 {
+			chineseNumber := parts[1]
+			arabicNumber := common.ConvertChineseToArabic(chineseNumber)
+			return arabicNumber + "号线"
+		}
+		return match
+	})
 
 	// 处理"地铁X号线"格式
 	subwayWithPrefixPattern := regexp.MustCompile(`(地铁|轨交)([一二三四五六七八九十两壹贰叁肆伍陆柒捌玖拾]+)号线`)
@@ -681,8 +684,8 @@ func (afe *AdvancedFieldExtractor) normalizeText(text string) string {
 		// 解析：前缀 + 中文数字 + 号线
 		parts := subwayWithPrefixPattern.FindStringSubmatch(match)
 		if len(parts) >= 3 {
-			prefix := parts[1]           // "地铁" 或 "轨交"
-			chineseNumber := parts[2]    // 中文数字
+			prefix := parts[1]        // "地铁" 或 "轨交"
+			chineseNumber := parts[2] // 中文数字
 			arabicNumber := common.ConvertChineseToArabic(chineseNumber)
 			return prefix + arabicNumber + "号线"
 		}
@@ -694,8 +697,8 @@ func (afe *AdvancedFieldExtractor) normalizeText(text string) string {
 	normalizedText = roomTypePattern.ReplaceAllStringFunc(normalizedText, func(match string) string {
 		submatches := roomTypePattern.FindStringSubmatch(match)
 		if len(submatches) >= 3 {
-			chineseNumber := submatches[1]  // 中文数字
-			suffix := submatches[2]         // 居室|室|厅|卫|房
+			chineseNumber := submatches[1] // 中文数字
+			suffix := submatches[2]        // 居室|室|厅|卫|房
 			arabicNumber := common.ConvertChineseToArabic(chineseNumber)
 			return arabicNumber + suffix
 		}
@@ -1806,7 +1809,6 @@ func (afe *AdvancedFieldExtractor) parseSubwayFromRegex(matches []string) interf
 	}
 	return nil
 }
-
 
 func (afe *AdvancedFieldExtractor) isProvince(location string) bool {
 	provinces := []string{"上海", "北京", "深圳", "广州", "杭州", "南京", "苏州", "天津", "重庆"}
@@ -3142,10 +3144,10 @@ func (afe *AdvancedFieldExtractor) parseBestPriceFromMatchesWithIndex(text strin
 		// 如果score更高，或相等但位置更靠后，则更新
 		if score > bestScore || (score == bestScore && candidate.Position > best.Position) {
 			afe.logger.WithFields(map[string]interface{}{
-				"candidate":      candidate.Data,
-				"candidate_pos":  candidate.Position,
+				"candidate":       candidate.Data,
+				"candidate_pos":   candidate.Position,
 				"candidate_score": score,
-				"replaced_score": bestScore,
+				"replaced_score":  bestScore,
 			}).Debug("Price candidate selection: new best found")
 
 			best = candidate
@@ -3219,10 +3221,10 @@ func (afe *AdvancedFieldExtractor) parseBestAreaFromMatchesWithIndex(text string
 		// 如果score更高，或相等但位置更靠后，则更新
 		if score > bestScore || (score == bestScore && candidate.Position > best.Position) {
 			afe.logger.WithFields(map[string]interface{}{
-				"candidate":      candidate.Data,
-				"candidate_pos":  candidate.Position,
+				"candidate":       candidate.Data,
+				"candidate_pos":   candidate.Position,
 				"candidate_score": score,
-				"replaced_score": bestScore,
+				"replaced_score":  bestScore,
 			}).Debug("Area candidate selection: new best found")
 
 			best = candidate
@@ -3296,10 +3298,10 @@ func (afe *AdvancedFieldExtractor) parseBestRentFromMatchesWithIndex(text string
 		// 如果score更高，或相等但位置更靠后，则更新
 		if score > bestScore || (score == bestScore && candidate.Position > best.Position) {
 			afe.logger.WithFields(map[string]interface{}{
-				"candidate":      candidate.Data,
-				"candidate_pos":  candidate.Position,
+				"candidate":       candidate.Data,
+				"candidate_pos":   candidate.Position,
 				"candidate_score": score,
-				"replaced_score": bestScore,
+				"replaced_score":  bestScore,
 			}).Debug("Rent candidate selection: new best found")
 
 			best = candidate
@@ -3316,17 +3318,16 @@ func (afe *AdvancedFieldExtractor) parseBestRentFromMatchesWithIndex(text string
 	return best.Data
 }
 
-
 // calculatePriceScore 计算价格信息的优先级分数
 func (afe *AdvancedFieldExtractor) calculatePriceScore(priceInfo map[string]interface{}) int {
 	// 评分常量定义
 	const (
-		operatorScore    = 100 // 有操作符的加分
-		rangeScore       = 50  // 有区间的加分
-		singleSideScore  = 30  // 单边限制加分
-		valueScore       = 10  // 有单值加分
-		maxRangeBonus    = 20  // 窄范围最大额外加分
-		rangeDivisor     = 200.0 // 范围评分除数
+		operatorScore   = 100   // 有操作符的加分
+		rangeScore      = 50    // 有区间的加分
+		singleSideScore = 30    // 单边限制加分
+		valueScore      = 10    // 有单值加分
+		maxRangeBonus   = 20    // 窄范围最大额外加分
+		rangeDivisor    = 200.0 // 范围评分除数
 	)
 
 	score := 0
@@ -3384,17 +3385,16 @@ func (afe *AdvancedFieldExtractor) calculatePriceScoreWithPosition(priceInfo map
 	return score
 }
 
-
 // calculateAreaScore 计算面积信息的优先级分数
 func (afe *AdvancedFieldExtractor) calculateAreaScore(areaInfo map[string]interface{}) int {
 	// 评分常量定义 (与价格相同的优先级体系)
 	const (
-		operatorScore    = 100 // 有操作符的加分
-		rangeScore       = 50  // 有区间的加分
-		singleSideScore  = 30  // 单边限制加分
-		valueScore       = 10  // 有单值加分
-		maxRangeBonus    = 20  // 窄范围最大额外加分
-		rangeDivisor     = 100.0 // 面积范围评分除数（比价格更小）
+		operatorScore   = 100   // 有操作符的加分
+		rangeScore      = 50    // 有区间的加分
+		singleSideScore = 30    // 单边限制加分
+		valueScore      = 10    // 有单值加分
+		maxRangeBonus   = 20    // 窄范围最大额外加分
+		rangeDivisor    = 100.0 // 面积范围评分除数（比价格更小）
 	)
 
 	score := 0
@@ -3456,9 +3456,9 @@ func (afe *AdvancedFieldExtractor) calculateAreaScoreWithPosition(areaInfo map[s
 // 评分策略：区间 > 单值；更窄范围 > 更宽范围
 func (afe *AdvancedFieldExtractor) calculateRentScore(rentInfo map[string]interface{}) int {
 	const (
-		RENT_RANGE_BONUS = 50    // 区间类型基础分
-		RENT_SINGLE_BONUS = 30   // 单值类型基础分
-		RENT_VALUE_BONUS = 10    // 数值大小权重
+		RENT_RANGE_BONUS  = 50 // 区间类型基础分
+		RENT_SINGLE_BONUS = 30 // 单值类型基础分
+		RENT_VALUE_BONUS  = 10 // 数值大小权重
 	)
 
 	score := 0

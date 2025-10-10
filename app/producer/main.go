@@ -104,9 +104,6 @@ func main() {
         router.POST("/stress", func(c *gin.Context) {
             handleStressRequest(c, kfService)
         })
-        router.POST("/stress/reset", func(c *gin.Context) {
-            handleStressReset(c)
-        })
     }
 
     httpAddr := cfg.Services.Producer.HTTPAddr
@@ -155,16 +152,6 @@ func handleStressRequest(c *gin.Context, kfService *kf.KFService) {
     }
 
     c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-// handleStressReset 重置压测状态（MsgID 计数器）
-func handleStressReset(c *gin.Context) {
-    stress.ResetAllMsgIDs()
-    log.GetInstance().Sugar.Info("Stress test MsgID counters reset")
-    c.JSON(http.StatusOK, gin.H{
-        "ok":      true,
-        "message": "MsgID counters reset for all users",
-    })
 }
 
 type kafkaCallbackSink struct {
