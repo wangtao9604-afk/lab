@@ -1,0 +1,28 @@
+// KFObserver implements kf.Observer pushing to Prometheus.
+type KFObserver struct{}
+
+func NewKFObserver() *KFObserver { return &KFObserver{} }
+
+func (KFObserver) OnMessage(appID, msgType, source string) {
+	KFMessagesTotal.WithLabelValues(appID, msgType, source).Inc()
+}
+
+func (KFObserver) OnHandleLatency(appID, msgType string, latencySec float64) {
+	KFHandleSeconds.WithLabelValues(appID, msgType).Observe(latencySec)
+}
+
+func (KFObserver) OnError(appID, stage string) {
+	KFErrorsTotal.WithLabelValues(appID, stage).Inc()
+}
+
+func (KFObserver) OnInFlightChange(appID string, delta int) {
+	if delta > 0 {
+		KFInFlightProcessors.WithLabelValues(appID).Add(float64(delta))
+	} else {
+		KFInFlightProcessors.WithLabelValues(appID).Sub(float64(-delta))
+	}
+}
+
+func (KFObserver) OnCursorCAS(appID, result string) {
+	KFCursorCASTotal.WithLabelValues(appID, result).Inc()
+}

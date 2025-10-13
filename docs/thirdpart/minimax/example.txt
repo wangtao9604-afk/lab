@@ -1,0 +1,169 @@
+源头网址：https://platform.minimaxi.com/document/对话?key=66701d281d57f38758d581d0
+
+基础示例
+import requests
+
+api_key = "请填写您的api_key"
+
+url = f"https://api.minimaxi.com/v1/text/chatcompletion_v2"
+headers = {
+    "Authorization": f"Bearer {api_key}",
+    "Content-Type": "application/json"
+}
+payload = {
+  "model": "MiniMax-M1",
+  "messages": [
+    {
+      "role": "system",
+      "name": "MiniMax AI"
+    },
+    {
+      "role":"user",
+      "name":"用户", # 选填字段
+      "content":"你好"
+      }
+  ]
+}
+
+response = requests.post(url, headers=headers, json=payload)
+
+print(response.status_code)
+print(response.text)
+
+基础示例返回：
+{
+    "id": "03d3f5bd571f85faa1d980d2f779630f",
+    "choices": [
+        {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+                "content": "你好！有什么我可以帮助你的吗？",
+                "role": "assistant",
+                "name": "MiniMax AI"
+            }
+        }
+    ],
+    "created": 1736753853,
+    "model": "MiniMax-M1",
+    "object": "chat.completion",
+    "usage": {
+        "total_tokens": 70,
+        "total_characters": 0,
+        "prompt_tokens": 62,
+        "completion_tokens": 8
+    },
+    "input_sensitive": false,
+    "output_sensitive": false,
+    "input_sensitive_type": 0,
+    "output_sensitive_type": 0,
+    "output_sensitive_int": 0,
+    "base_resp": {
+        "status_code": 0,
+        "status_msg": ""
+    }
+}
+
+流式请求示例
+import requests
+
+group_id = "请填写您的group_id"
+api_key = "请填写您的api_key"
+
+url = f"https://api.minimaxi.com/v1/text/chatcompletion_v2?GroupId={group_id}"
+headers = {
+    "Authorization": f"Bearer {api_key}",
+    "Content-Type": "application/json"
+}
+payload = {
+  "model": "MiniMax-M1",
+  "messages": [
+    {
+      "role": "system",
+      "name": "MiniMax AI"
+    },
+    {
+      "role":"user",
+      "name":"用户", # 选填字段
+      "content":"你好”"
+      }
+  ],
+  "stream": True,
+}
+
+response = requests.post(url, headers=headers, json=payload, stream = True)
+
+for chunk in response.iter_lines():
+    if chunk:
+        chunkStr = chunk.decode("utf-8")
+        print(chunkStr)
+        print("————————————————————")
+
+stream返回示例
+{"id":"02ff7eb7fe6fb505b9d5cb6945a1a98b","choices":[{"index":0,"delta":{"content":"你好","role":"assistant"}}],"created":1722829751,"model":"MiniMax-M1","object":"chat.completion.chunk","output_sensitive":false,"input_sensitive_type":0,"output_sensitive_type":0}
+
+{"id":"02ff7eb7fe6fb505b9d5cb6945a1a98b","choices":[{"finish_reason":"stop","index":0,"delta":{"content":"！有什么可以帮助你的吗？","role":"assistant"}}],"created":1722829751,"model":"MiniMax-M1","object":"chat.completion.chunk","output_sensitive":false,"input_sensitive_type":0,"output_sensitive_type":0}
+
+{"id":"02ff7eb7fe6fb505b9d5cb6945a1a98b","choices":[{"finish_reason":"stop","index":0,"message":{"content":"你好！有什么可以帮助你的吗？","role":"assistant"}}],"created":1722829751,"model":"MiniMax-M1","object":"chat.completion","usage":{"total_tokens":73},"input_sensitive":false,"output_sensitive":false,"input_sensitive_type":0,"output_sensitive_type":0,"base_resp":{"status_code":0,"status_msg":""}}
+
+json_schema参数示例
+"json_schema": {
+  "name": "user_analysis",
+  "description": "User behavior analysis result",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "analysis": {
+        "type": "string",
+        "description": "Content analysis based on rules"
+      },
+      "summary_words": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Content keywords summary, limited to three words"
+      },
+      "content_result": {
+        "type": "string",
+        "enum": [
+          "低俗色情违规",
+          "广告引流违规",
+          "违法违规",
+          "涉政违规",
+          "自杀自残违规",
+          "未成年违规",
+          "攻击辱骂违规",
+          "其他违规",
+          "正常"
+        ],
+        "description": "Content classification result"
+      },
+      "risk_words": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Keywords indicating violations, emojis converted to text"
+      },
+      "correct_rate": {
+        "type": "number",
+        "description": "Credibility score, from 0.00 to 1.00"
+      },
+      "content_risk_level": {
+        "type": "string",
+        "enum": ["high", "medium", "low"],
+        "description": "Risk concentration level in content"
+      }
+    },
+    "required": [
+      "analysis",
+      "summary_words",
+      "content_result",
+      "risk_words",
+      "correct_rate",
+      "content_risk_level"
+    ]
+  }
+}
+

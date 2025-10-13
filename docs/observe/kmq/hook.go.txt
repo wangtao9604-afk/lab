@@ -1,0 +1,68 @@
+// Package kmq: observability hooks (external-injection, NO Prometheus dependency)
+package kmq
+
+import "sync/atomic"
+
+// GateBacklogReport is called when PartitionCommitGate backlog changes.
+// topic: topic name, partition: partition id, backlog: #done-but-uncommitted
+type GateBacklogReport func(topic string, partition int32, backlog int64)
+
+// BatchCommitReport is called when a batch commit completes.
+// ok=true on success, false on failure.
+type BatchCommitReport func(topic string, ok bool)
+
+// RebalanceReport is called on group rebalance events (assigned|revoked|lost).
+type RebalanceReport func(group string, eventType string)
+
+// DLQReport is called when a DLQ message is produced by producer/consumer.
+// component: "producer" or "consumer".
+type DLQReport func(topic string, component string)
+
+// PartitionHooks aggregates all optional callbacks.
+type PartitionHooks struct {
+	OnGateBacklog GateBacklogReport
+	OnBatchCommit BatchCommitReport
+	OnRebalance   RebalanceReport
+	OnDLQ         DLQReport
+}
+
+var hooks atomic.Value // stores PartitionHooks
+
+// WithPartitionHooks installs global hooks (thread-safe).
+// Passing a zero value removes all hooks (NOOP).
+func WithPartitionHooks(h PartitionHooks) { hooks.Store(h) }
+
+func getHooks() PartitionHooks {
+	v := hooks.Load()
+	if v == nil {
+		return PartitionHooks{}
+	}
+	return v.(PartitionHooks)
+}
+
+// ----- Helper reporters to be called inside kmq hot paths -----
+// NOTE: Always call reporters **after unlocking** internal mutexes to avoid blocking.
+
+func ReportGateBacklog(topic string, partition int32, backlog int64) {
+	if cb := getHooks().OnGateBacklog; cb != nil {
+		cb(topic, partition, backlog)
+	}
+}
+
+func ReportBatchCommit(topic string, ok bool) {
+	if cb := getHooks().OnBatchCommit; cb != nil {
+		cb(topic, ok)
+	}
+}
+
+func ReportRebalance(group, eventType string) {
+	if cb := getHooks().OnRebalance; cb != nil {
+		cb(group, eventType)
+	}
+}
+
+func ReportDLQ(topic, component string) {
+	if cb := getHooks().OnDLQ; cb != nil {
+		cb(topic, component)
+	}
+}

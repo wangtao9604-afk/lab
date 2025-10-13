@@ -1,0 +1,335 @@
+文本生成（ChatCompletion）
+该API支持Openai参数定义和基础对话能力，还支持tools调用能力，可参考示例进行接入使用。支持通过 API 或者 OpenAI SDK进行接入，参考下方文档进行接入。
+
+支持模型
+模型名称     最大token数（一次请求+回复的输入输出总token）
+MiniMax-M1      1000192
+MiniMax-Text-01 1000192
+
+接口参数说明
+接口地址：https://api.minimaxi.com/v1/text/chatcompletion_v2
+
+请求体（Request）参数
+Authorization string Required
+HTTP：Bearer Auth
+- Security Scheme Type: http
+- HTTP Authorization Scheme: BearerAPI_key，可在账户管理>接口密钥中查看。
+Content-Type application/json Required
+Content-Type
+
+model  string  Required
+调用的模型ID。目前支持取以下值：MiniMax-M1MiniMax-Text-01。注：MiniMax-M1为推理模型，输出tokens较多，调用时建议使用流式输出以获得更稳定的网络连接。
+
+stream bool
+是否通过流式分批返回结果。如果设置为true，结果分批返回，两个换行分割分批返回结果.默认为false
+
+max_tokens int64 (0,40000]
+最大生成token数，需要注意的是，这个参数并不会影响模型本身的生成效果，而是仅仅通过以截断超出的token的方式来实现功能。可选，目前默认取值MiniMax-M1为8192，MiniMax-Text-01为2048。如遇到length原因停止生成请修改该值。
+
+temperature  float，(0,1]
+较高的值将使输出更加随机，而较低的值将使输出更加集中和确定。MiniMax-M1默认取值为1，MiniMax-Text-01默认取值为0.1。MiniMax-M1推荐范围[0.8, 1];MiniMax-Text-01参考：低（0.01~0.2）：适合答案较明确的场景（如：知识问答、总结说明、情感分析、文本分类、大纲生成、作文批改）⾼（0.7〜1）：适合答案较开放发散的场景 （如：营销文案生成、人设对话）
+
+top_p  float，(0,1]
+采样方法，数值越小结果确定性越强；数值越大，结果越随机。取值可选，各模型默认为0.95
+
+mask_sensitive_info bool
+对输出中易涉及隐私问题的文本信息进行打码，目前包括但不限于邮箱、域名、链接、证件号、家庭住址等，默认False，即不开启打码。
+
+messages  array  Required
+对话的内容
+  role string  Required
+  发送者的类型。取值如下：system：定义智能体bot设定的role类型；user：在对话阶段，用户发送消息的role类型；assistant：在对话阶段，智能体发送回复的role类型；tool：定义function的role类型；
+
+  name   string
+  发送者的名称。须提供具体名称以区分同一类型的不同具体角色。
+
+  content string or array Required
+  发送的内容。当为纯文本输入时使用string类型，当需要image input时使用array类型。
+    type string
+    内容类型，支持text、image_url两种
+    
+    text  string
+    当图文混合输入时，文本类型的具体文字内容信息。
+    
+    image_url
+    图片的url信息，url要保证公网可访问，也支持base64编码的图片信息
+    
+    url  string
+    图片的url地址，需要保证公网可访问2. 也支持base64编码的图片信息
+
+  tool_calls
+  模型生成的tools信息。role需要为assistant。
+    id string Required
+    function的调用信息对应的id.在触发function时会返回该id。
+    
+    type string Required
+    function的类型，仅支持function。
+    
+    function Required
+    模型生成的function调用信息。
+      name string Required
+      function对应的名称。
+      
+      arguments string Required
+      function的具体调用信息。
+
+tool_choice  string
+tool工具的开关.支持以下2种模式：1、none：不调用function call；2、auto：自动判断是否调用funcition call。
+
+tools
+支持的工具。
+  type  string Required
+  支持的工具类型，目前仅支持function
+  
+  function Required
+  function的定义。
+    description string Required
+    funciton的描述。
+    
+    name string Required
+    function的名称。
+    
+    parameters object
+    function的参数。
+
+response_format object
+指定模型必须输出的格式。该参数仅支持MiniMax-Text-01。设置为{ "type": "json_schema", "json_schema": {...} }以实现结构化输出，这会确保模型返回的内容结构完全匹配您提供的JSON schema。示例参考example.txt
+  type  string Required
+  定义的响应格式类型， 仅支持"json_schema"
+  
+  json_schema  object  Required
+    description string
+    描述输出格式的说明，用于模型确定如何以该格式进行输出。
+    
+    name  string  Required
+    输出格式的名称。必须由a-z、A-Z、0-9 组成，或包含下划线和破折号，最大长度为64。
+    
+    schema  object
+    定义输出格式，形式为JSON Schema object。
+      type string Required
+      取值应为"object"
+      
+      properties object Required
+      详细定义格式化输出所需的内容。支持的类型包括：String、Array、Enum、Number、Integer、Object、Boolean。请注意，使用结构化输出时，所有字段或函数参数都必须指定为required。
+
+stream_options
+  include_usage boolean
+  如果设置为True，将在最后流出一个额外的chunk。此块上的 usage 字段显示整个请求的token使用统计信息，而 choices 字段始终为空数组。所有其他块也将包含一个 usage 字段，但值为 null。
+
+==============================================================
+==============================================================
+
+返回(Response)参数
+id string
+响应id
+
+choices array
+回复消息选项，里面包含对应的信息
+  finish_reason string
+  模型生成停止的原因。目前支持取以下值：1、stop：正常结束；2、tool_calls：触发function calling；3、length：请求超过token长度。
+
+  index int
+  回复消息的索引，目前仅支持1个选项。
+
+  message dict
+  回复信息详细内容。
+  
+  content string
+  回复的内容。
+  
+  role string
+  回复消息的角色，目前仅支持assistant。
+
+  tool_calls
+  模型生成的tools信息，role需要为assistant。
+    id string
+    function的调用信息对应的id,在触发function时会返回该id。
+
+    type string
+    function的类型，仅支持function。
+
+    function
+    模型生成的function调用信息。
+      name string
+      function对应的名称。
+
+      arguments string
+      function的具体调用信息。
+
+created int
+创建的时间戳。
+
+model string
+聊天选择的模型。
+
+objectstring
+对象类型为流式或非流式，取值为chat.completion或chat.completion.chunk。
+
+usage
+本次请求的消耗。
+  total_tokens int
+  本次请求的消耗token。
+
+input_sensitive bool
+输入命中敏感词。如果输入内容严重违规，接口会返回内容违规错误信息，回复内容为空。
+  input_sensitive_type int64
+  输入命中敏感词类型，当input_sensitive为true时返回。取值为以下其一：1 严重违规；2 色情；3 广告；4 违禁；5 谩骂；6 暴恐；7 其他。
+
+output_sensitive bool
+输出命中敏感词。如果输出内容严重违规，接口会返回内容违规错误信息，回复内容为空。
+  output_sensitive_type int64
+  输出命中敏感词类型，当output_sensitive为true时返回。取值为以下其一：1 严重违规；2 色情；3 广告；4 违禁；5 谩骂；6 暴恐；7 其他。
+
+base_resp  BaseResp
+错误状态码和详情。
+  status_code int64
+  状态码。1000，未知错误；1001，请求超时；1002，触发RPM限流；1004，鉴权失败1008，余额不足；1013，服务内部错误；1027，输出内容错误；1039，Token限制；2013，参数错误。
+
+  status_msg string
+  错误详情。
+
+
+============================================================
+============================================================
+SDK 接入
+Chat Completion v2接口支持通过OpenAI SDK进行接入，分为如下2步OpenAI SDK：
+1.安装 Python 3.7.1 或更高版本后，就可以安装 OpenAI Python 库。在终端/命令行中，运行：
+  pip install --upgrade openai
+2. 在账户管理-接口密钥获取你的API Key。
+3. 在接入代码使用OpenAI SDK参考代码示例进行接入和使用，更多示例可参考上方API说明中的python示例。
+   from openai import OpenAI
+
+   client = OpenAI(api_key="<minimax api key>", base_url="https://api.minimaxi.com/v1")
+
+    response = client.chat.completions.create(
+    model="MiniMax-M1",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello!"}
+    ],
+    stream=True
+   )
+
+  for chunk in response:
+    print(chunk)
+  
+  返回示例
+  ChatCompletionChunk(id='02fd53267b5e09b5030cf1bc99f42d3a', choices=[Choice(delta=ChoiceDelta(content='你好', function_call=None, role='assistant', tool_calls=None), finish_reason=None, index=0, logprobs=None)], created=1722687527, model='MiniMax-M1', object='chat.completion.chunk', service_tier=None, system_fingerprint=None, usage=None, output_sensitive=False, input_sensitive_type=0, output_sensitive_type=0)
+  ChatCompletionChunk(id='02fd53267b5e09b5030cf1bc99f42d3a', choices=[Choice(delta=ChoiceDelta(content='！很高兴能和你交流。有什么问题或者话题想要讨论吗？我在这里帮助你。', function_call=None, role='assistant', tool_calls=None), finish_reason='stop', index=0, logprobs=None)], created=1722687527, model='MiniMax-M1', object='chat.completion.chunk', service_tier=None, system_fingerprint=None, usage=None, output_sensitive=False, input_sensitive_type=0, output_sensitive_type=0)
+  ChatCompletionChunk(id='02fd53267b5e09b5030cf1bc99f42d3a', choices=[Choice(delta=None, finish_reason='stop', index=0, logprobs=None, message={'content': '你好！很高兴能和你交流。有什么问题或者话题想要讨论吗？我在这里帮助你。', 'role': 'assistant'})], created=1722687527, model='MiniMax-M1', object='chat.completion', service_tier=None, system_fingerprint=None, usage=CompletionUsage(completion_tokens=None, prompt_tokens=None, total_tokens=87), input_sensitive=False, output_sensitive=False, input_sensitive_type=0, output_sensitive_type=0, base_resp={'status_code': 0, 'status_msg': ''})
+
+============================================================================
+============================================================================
+
+函数调用（function calling）
+该功能可触发调用用户自有函数（如客户自有的会议记录查询函数），得到自有函数的参考内容 ，辅助大模型生成结果。可以帮助模型获取用户希望模型获取的相应信息，以使得模型返回更符合用户个人实际情况的回复。
+特别是在一些需要基于客户自有信息知识的问题回答上，并且需要使用构建了该信息知识的API，那么用户可以考虑使用function calling功能，使用场景示例如下：
+  1、query：“在会议ID：12345的会议上，A同学有没有提到大模型如何应用的事情？”
+  2、用户自有函数，函数功能：可基于会议ID和参会人检索原始的会议记录
+  3、参考内容：“会议号：12345，参会人：A同学，发言内容：我们要在MM智能助理app中全面拥抱大模型，将其强大的自然语言处理能力和广泛的应用场景深入融合到app的各个功能模块，充分发挥大模型所带来的技术优势，进一步提升用户体验，提高工作效率，为更多用户提供智能化、便捷化的服务。”
+  4、大模型生成结果：“A同学在会议ID：12345的会议上提到了大模型如何应用的事情。他说要在MM智能助理app中全面拥抱大模型，将其强大的自然语言处理能力和广泛的应用场景深入融合到app的各个功能模块，充分发挥大模型所带来的技术优势，进一步提升用户体验，提高工作效率，为更多用户提供智能化、便捷化的服务。”
+以上，如果仅靠大模型来回答query时无法得到符合预期的回复，因此在这时就需要使用function calling功能。
+
+Function Calling示例
+具体流程如下：
+（MiniMax-M1拥有单轮多function调用能力，详见下方示例）
+1、触发function，输出function输入参数
+2、得到function的出参，给到模型参考进行总结回复 
+3. 多function调用 多function调用（回传）
+  
+  多function调用 多function调用（回传）
+  curl --location 'https://api.minimaxi.com/v1/text/chatcompletion_v2' \
+--header 'Content-Type: application/json' \
+--header "Authorization: Bearer $MiniMax_API_KEY" \
+--data '{
+  "model": "MiniMax-M1",
+  "messages": [
+    {
+      "role": "system",
+      "content": "MM智能助理是一款由MiniMax自研的，没有调用其他产品的接口的大型语言模型。MiniMax是一家中国科技公司，一直致力于进行大模型相关的研究。"
+    },
+    {
+      "role": "user",
+      "content": "广州和上海天气怎么样"
+    },
+        {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "call_function_1849136893",
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "arguments": "{\"location\":\"广州\"}"
+            },
+{
+            "id": "call_function_1849136892",
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "arguments": "{\"location\":\"上海\"}"
+            }
+        }]
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "call_function_1849136893",
+        "content": "多云，28~37℃，无持续风向<3级，空气质量优"
+    },
+{
+        "role": "tool",
+        "tool_call_id": "call_function_1849136892",
+        "content": "晴天，20~27℃，无持续风向<3级，空气质量优"
+    }
+  ],
+  "tools": [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "获取近期某一地点的天气情况",
+            "parameters": "{\"type\":\"object\", \"properties\":{\"location\":{\"type\":\"string\", \"description\":\"某一个城市，比如北京、上海\"}}, \"required\":[\"location\"]}"
+        }
+    }
+],
+  "tool_choice": "auto"
+}'
+  
+1、触发function，输出function输入参数
+2、得到function的出参，给到模型参考进行总结回复  多function调用 多function调用（最终回复）
+返回示例（流式）
+{
+    "id": "02ffb000ff4b7202faae09b999b27c16",
+    "choices": [
+        {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_function_6835316862",
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "arguments": "{\"location\": \"广州\"}"
+                        }
+                    }
+                ]
+            }
+        }
+    ],
+    "created": 1722842368,
+    "model": "MiniMax-M1",
+    "object": "chat.completion",
+    "usage": {
+        "total_tokens": 153
+    },
+    "input_sensitive": false,
+    "output_sensitive": false,
+    "input_sensitive_type": 0,
+    "output_sensitive_type": 0,
+    "base_resp": {
+        "status_code": 0,
+        "status_msg": ""
+    }
+}

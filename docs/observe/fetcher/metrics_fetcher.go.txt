@@ -1,0 +1,42 @@
+package prom
+
+import "github.com/prometheus/client_golang/prometheus"
+
+var (
+	FetcherLeader = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "leader", Help: "1 if leader"},
+		[]string{"app_id", "instance"},
+	)
+	FetcherAcquireTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "acquire_leadership_total", Help: "Acquire leadership attempts by result."},
+		[]string{"app_id", "instance", "result"},
+	)
+	FetcherPullBatchSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "pull_batch_seconds", Help: "WeCom fetch latency.", Buckets: []float64{0.01,0.05,0.1,0.2,0.5,1,2,5}},
+		[]string{"app_id"},
+	)
+	FetcherPullBatchSize = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "pull_batch_size", Help: "Msgs per batch.", Buckets: []float64{1,2,5,10,20,50,100}},
+		[]string{"app_id"},
+	)
+	FetcherFanoutMessagesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "fanout_messages_total", Help: "Fanned-out messages."},
+		[]string{"app_id"},
+	)
+	FetcherCASTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "cas_total", Help: "CAS results (ok|not_leader|version_conflict|error)."},
+		[]string{"app_id", "result"},
+	)
+	FetcherOfflineMode = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "offline_mode", Help: "1 if offline advancing."},
+		[]string{"app_id"},
+	)
+	FetcherOfflineDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "offline_duration_seconds", Help: "Offline window duration.", Buckets: []float64{1,5,10,30,60,120,300,600}},
+		[]string{"app_id"},
+	)
+	FetcherLocalShadowDirty = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Namespace: "qywx", Subsystem: "fetcher", Name: "local_shadow_dirty", Help: "Local shadow dirty flag."},
+		[]string{"app_id"},
+	)
+)

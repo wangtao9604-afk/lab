@@ -1,0 +1,59 @@
+package prom
+
+import (
+	"strconv"
+	"time"
+
+	"your/module/path/infrastructures/mq/kmq"
+	"your/module/path/pkg/fetcher"
+	"your/module/path/pkg/kf"
+)
+
+// FetcherObserver implements fetcher.Observer pushing to Prometheus.
+type FetcherObserver struct {
+	Instance string
+}
+
+func NewFetcherObserver(instance string) *FetcherObserver { return &FetcherObserver{Instance: instance} }
+
+func (o *FetcherObserver) OnAcquireAttempt(appID, instance, result string) {
+	FetcherAcquireTotal.WithLabelValues(appID, instance, result).Inc()
+}
+
+func (o *FetcherObserver) OnLeaderChanged(appID, instance string, leader bool) {
+	if leader {
+		FetcherLeader.WithLabelValues(appID, instance).Set(1)
+	} else {
+		FetcherLeader.WithLabelValues(appID, instance).Set(0)
+	}
+}
+
+func (o *FetcherObserver) OnPullBatch(appID string, latencySec float64, size int) {
+	FetcherPullBatchSeconds.WithLabelValues(appID).Observe(latencySec)
+	FetcherPullBatchSize.WithLabelValues(appID).Observe(float64(size))
+}
+
+func (o *FetcherObserver) OnFanout(appID string, n int) {
+	FetcherFanoutMessagesTotal.WithLabelValues(appID).Add(float64(n))
+}
+
+func (o *FetcherObserver) OnCASResult(appID, result string) {
+	FetcherCASTotal.WithLabelValues(appID, result).Inc()
+}
+
+func (o *FetcherObserver) OnOfflineStart(appID string, at time.Time) {
+	FetcherOfflineMode.WithLabelValues(appID).Set(1)
+}
+
+func (o *FetcherObserver) OnOfflineStop(appID string, startedAt time.Time, durationSec float64) {
+	FetcherOfflineMode.WithLabelValues(appID).Set(0)
+	FetcherOfflineDuration.WithLabelValues(appID).Observe(durationSec)
+}
+
+func (o *FetcherObserver) OnLocalShadowDirty(appID string, dirty bool) {
+	if dirty {
+		FetcherLocalShadowDirty.WithLabelValues(appID).Set(1)
+	} else {
+		FetcherLocalShadowDirty.WithLabelValues(appID).Set(0)
+	}
+}

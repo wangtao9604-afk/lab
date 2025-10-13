@@ -1,0 +1,26 @@
+package prom
+
+import "github.com/prometheus/client_golang/prometheus"
+
+var (
+	KFMessagesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Namespace: "qywx", Subsystem: "kf", Name: "messages_total", Help: "KF messages by type."},
+		[]string{"app_id", "msg_type", "source"},
+	)
+	KFHandleSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{Namespace: "qywx", Subsystem: "kf", Name: "handle_seconds", Help: "KF end-to-end latency.", Buckets: []float64{0.01,0.05,0.1,0.2,0.5,1,2,5,10}},
+		[]string{"app_id", "msg_type"},
+	)
+	KFErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Namespace: "qywx", Subsystem: "kf", Name: "errors_total", Help: "KF errors by stage."},
+		[]string{"app_id", "stage"},
+	)
+	KFInFlightProcessors = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Namespace: "qywx", Subsystem: "kf", Name: "inflight_processors", Help: "Active per-user processors."},
+		[]string{"app_id"},
+	)
+	KFCursorCASTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Namespace: "qywx", Subsystem: "kf", Name: "cursor_cas_total", Help: "Cursor CAS results seen in KF."},
+		[]string{"app_id", "result"},
+	)
+)

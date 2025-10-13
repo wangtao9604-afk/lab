@@ -1,0 +1,273 @@
+package redisfetcher
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"your/module/path/qywx_cursor_fetcher/shared"
+)
+
+type RedisConf struct {
+	// 单机
+	Addr     string `yaml:"addr"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
+
+	// 哨兵
+	UseSentinel   bool     `yaml:"useSentinel"`
+	SentinelAddrs []string `yaml:"sentinelAddrs"`
+	MasterName    string   `yaml:"masterName"`
+	SentinelPass  string   `yaml:"sentinelPassword"`
+
+	// 租约
+	LeaseTTLSeconds int `yaml:"leaseTTLSeconds"` // eg. 10~30
+}
+
+type RedisCursorStore struct {
+	rdb  *redis.Client
+	keys struct {
+		EpochCounter string
+		LeaseKey     string
+		ValueKey     string
+		VersionKey   string
+	}
+	ttl time.Duration
+
+	// Lua scripts
+	casUpdate *redis.Script
+	renew     *redis.Script
+}
+
+func NewRedisClient(conf RedisConf) (*redis.Client, error) {
+	if conf.UseSentinel {
+		return redis.NewFailoverClient(&redis.FailoverOptions{
+			MasterName:       conf.MasterName,
+			SentinelAddrs:    conf.SentinelAddrs,
+			SentinelPassword: conf.SentinelPass,
+			Password:         conf.Password,
+			DB:               conf.DB,
+			MaxRetries:       2,
+			DialTimeout:      5 * time.Second,
+			ReadTimeout:      2 * time.Second,
+			WriteTimeout:     2 * time.Second,
+		}), nil
+	}
+	return redis.NewClient(&redis.Options{
+		Addr:         conf.Addr,
+		Password:     conf.Password,
+		DB:           conf.DB,
+		MaxRetries:   2,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+	}), nil
+}
+
+func NewRedisCursorStore(rdb *redis.Client, keyPrefix string, leaseTTL time.Duration) *RedisCursorStore {
+	s := &RedisCursorStore{rdb: rdb, ttl: leaseTTL}
+	s.keys.EpochCounter = keyPrefix + ":cursor:epoch"
+	s.keys.LeaseKey = keyPrefix + ":cursor:lease"
+	s.keys.ValueKey = keyPrefix + ":cursor:value"
+	s.keys.VersionKey = keyPrefix + ":cursor:version"
+
+	s.casUpdate = redis.NewScript(casUpdateLua)
+	s.renew = redis.NewScript(renewLeaseLua)
+	return s
+}
+
+// AcquireLeadership 尝试成为 Leader，返回 epoch（围栏令牌）和取消续约的函数（幂等）
+func (s *RedisCursorStore) AcquireLeadership(ctx context.Context) (epoch int64, cancelRenew func(), ok bool, err error) {
+	// 1) 生成新的 epoch（单调递增的围栏令牌）
+	epoch, err = s.rdb.Incr(ctx, s.keys.EpochCounter).Result()
+	if err != nil {
+		return 0, nil, false, fmt.Errorf("incr epoch: %w", err)
+	}
+	// 2) 竞争租约：SET lease = epoch NX PX ttl
+	set, err := s.rdb.SetNX(ctx, s.keys.LeaseKey, strconv.FormatInt(epoch, 10), s.ttl).Result()
+	if err != nil {
+		return 0, nil, false, fmt.Errorf("setnx lease: %w", err)
+	}
+	if !set {
+		return 0, nil, false, nil // 未成为Leader
+	}
+	// 3) 启动续约协程（仅当当前 lease 的 value==epoch 时续约成功）
+	stop := make(chan struct{})
+	var once sync.Once
+	cancel := func() { once.Do(func() { close(stop) }) } // ← 幂等，避免二次关闭 panic
+
+	go func() {
+		ticker := time.NewTicker(s.ttl / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				// renew lease only if my epoch still owns it
+				_, _ = s.renew.Run(ctx, s.rdb,
+					[]string{s.keys.LeaseKey},
+					strconv.FormatInt(epoch, 10),
+					int64(s.ttl/time.Millisecond),
+				).Result()
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return epoch, cancel, true, nil
+}
+
+func (s *RedisCursorStore) LoadCursor(ctx context.Context) (cursor string, version int64, err error) {
+	res, err := s.rdb.MGet(ctx, s.keys.ValueKey, s.keys.VersionKey).Result()
+	if err != nil {
+		return "", 0, err
+	}
+	// 初始场景：都不存在，视为 cursor="" version=0
+	cur := ""
+	if res[0] != nil {
+		switch v := res[0].(type) {
+		case string:
+			cur = v
+		case []byte:
+			cur = string(v)
+		}
+	}
+	var ver int64 = 0
+	if res[1] != nil {
+		switch v := res[1].(type) {
+		case string:
+			ver, _ = strconv.ParseInt(v, 10, 64)
+		case []byte:
+			ver, _ = strconv.ParseInt(string(v), 10, 64)
+		}
+	}
+	return cur, ver, nil
+}
+
+// UpdateCursorCAS 使用 Lua 原子校验 epoch + version；返回 1=成功, 0=非Leader, -1=版本冲突
+func (s *RedisCursorStore) UpdateCursorCAS(ctx context.Context, epoch int64, expectVersion int64, newCursor string) (int64, error) {
+	ret, err := s.casUpdate.Run(ctx, s.rdb,
+		[]string{s.keys.ValueKey, s.keys.VersionKey, s.keys.LeaseKey},
+		strconv.FormatInt(epoch, 10), strconv.FormatInt(expectVersion, 10), newCursor).Int64()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return -2, err
+	}
+	return ret, nil
+}
+
+// ---------- Fetcher 主循环 ----------
+
+type Fetcher struct {
+	Store *RedisCursorStore
+	Wx    shared.WeComClient
+	Out   *shared.KafkaOut
+
+	PollIntervalNoData time.Duration // 无数据时的休眠
+	AppID              string        // 仅用于日志/指标
+}
+
+func (f *Fetcher) Run(ctx context.Context) error {
+	for ctx.Err() == nil {
+		epoch, cancelRenew, ok, err := f.Store.AcquireLeadership(ctx)
+		if err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		if !ok {
+			// 不是Leader，稍后再试
+			time.Sleep(800 * time.Millisecond)
+			continue
+		}
+		// 成为Leader：runAsLeader 只负责业务循环；续约的关闭由此处统一负责
+		err = f.runAsLeader(ctx, epoch)
+
+		// 退出领导：无论 runAsLeader 如何结束，都在此处统一停止续约协程（幂等）
+		if cancelRenew != nil {
+			cancelRenew()
+		}
+
+		if err != nil && ctx.Err() == nil {
+			// 记录错误后短暂退避
+			time.Sleep(time.Second)
+		}
+	}
+	return ctx.Err()
+}
+
+func (f *Fetcher) runAsLeader(ctx context.Context, epoch int64) error {
+	for ctx.Err() == nil {
+		// 1) 读取当前 cursor + version
+		cur, ver, err := f.Store.LoadCursor(ctx)
+		if err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		// 2) 向企业微信拉取一批
+		msgs, nextCur, hasMore, err := f.Wx.FetchBatch(ctx, cur)
+		if err != nil {
+			// 上游错误，短暂退避
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		// 3) 扇出到 Kafka（逐条）
+		for _, m := range msgs {
+			_ = f.Out.Produce(m) // 失败已有 DLQ 兜底
+		}
+		// 4) CAS 推进 cursor（带围栏）
+		rc, err := f.Store.UpdateCursorCAS(ctx, epoch, ver, nextCur)
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if rc == 0 {
+			// 不是Leader（租约丢失或被接管）→ 退出领导
+			return nil
+		}
+		if rc == -1 {
+			// 版本冲突：并发推进（极小概率）→ 重读后重试
+			continue
+		}
+		// rc==1 成功推进
+		if !hasMore {
+			time.Sleep(f.PollIntervalNoData)
+		}
+	}
+	return ctx.Err()
+}
+
+// ---------- Lua 脚本 ----------
+
+const casUpdateLua = `
+-- KEYS: 1=valueKey, 2=versionKey, 3=leaseKey
+-- ARGV: 1=epoch, 2=expectVersion, 3=newCursor
+local lease = redis.call('GET', KEYS[3])
+if (not lease) or (lease ~= ARGV[1]) then
+  return 0 -- not leader
+end
+local ver = redis.call('GET', KEYS[2])
+if (not ver) then ver = "0" end
+if (tonumber(ver) ~= tonumber(ARGV[2])) then
+  return -1 -- version conflict
+end
+redis.call('SET', KEYS[1], ARGV[3])
+redis.call('INCR', KEYS[2])
+return 1
+`
+
+const renewLeaseLua = `
+-- KEYS: 1=leaseKey
+-- ARGV: 1=epoch, 2=ttl_ms
+local lease = redis.call('GET', KEYS[1])
+if (not lease) or (lease ~= ARGV[1]) then
+  return 0 -- not leader anymore
+end
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return 1
+`
