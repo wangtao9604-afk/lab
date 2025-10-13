@@ -1,6 +1,7 @@
 environment = "dev"  # 环境类型: dev|prod|container
-domain = "minimax.ipangsell.com"
+domain = "work.ipangsell.com"
 platform = 2  # 1=web, 2=mobile, 3=ignore
+stress = true  # 压测模式开关，设为 true 启用压测功能（默认 false）
 
 [log]
     logRootDir = "/var/log/qywx"  # 日志文件根目录
@@ -9,7 +10,11 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
 
 [redises]
     [redises.General]  # 通用Redis实例配置
-        addr = "127.0.0.1:6379"
+        useSentinel = true
+        addr = "192.168.57.40:6379"
+        sentinelAddrs = ["192.168.57.40:26379", "192.168.57.41:26379", "192.168.57.42:26379"]
+        masterName = "mymaster"
+        sentinelPassword = ""
         user = ""
         password = ""
         db = 1
@@ -21,12 +26,13 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
         writeTimeout = 3   # 写入超时(秒)
 
 [suite]
-    token = "CkVrLV1hF6sfNFwQrp0c"
-    encodingAESKey =  "ChSxQ72OW4Fu4DzFBwkMkK3VbjHENw3N2d8K3BJZx61"
+    token = "SAWVIkc6j4MCfKLkA9Ui"
+    encodingAESKey =  "jRdtDbVA32kBHvEbAHvs54t3oAkrDz8tveCTKQz7fGF"
     suiteId = "ww24103d9c43d9ccc6"
-    agentId = "1000007"
-    secret = "CezDsHu0inUlG1nsp7qsKE1D6xjyayzHcI9nLxWqENc"
+    agentId = "1000008"
+    secret = "sn3rsN86xfBEwr-Zo3mah3CnlNkA6o0MZnI_xCavLx4"
     ticketTimeOut = 600
+    kfId = "wk6Gh8CQAAH3T-AxpjWbx8Ybhw84AFnQ"
 
 [misc]
     templateId = ""
@@ -36,9 +42,18 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
     timeout = 30
 
 [schedule]
-    processorLifetimeHours = 30    # 用户会话生命周期 (分钟)
-    compactHistory = false         # 是否压缩历史（默认false）
-    maxHistoryLength = 20          # 压缩时保留的消息数
+    processorLifetimeMinutes = 30    # 用户会话生命周期 (分钟)
+    compactHistory = true            # 是否压缩历史（默认false）
+    maxHistoryLength = 16            # 压缩时保留的消息数
+
+[services.producer]
+    httpAddr = ":11112"
+
+[services.consumer]
+    httpAddr = ":11113"
+
+[services.recorder]
+    httpAddr = ":11114"
 
 # Ipang房产查询API配置
 [ipang]
@@ -51,6 +66,123 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
     # ignore: 忽略租金价格字段，但保留其他字段（买租混合，保留地段/户型等）
     # none: 不进行任何租售过滤（全业务场景）
     rentalFilterStrategy = "strict"
+
+[kafka]
+    brokers = "192.168.57.30:9092,192.168.57.31:9092,192.168.57.32:9092"
+
+    [kafka.producer.chat]
+        clientId = "qywx-producer"
+        acks = "all"
+        enableIdempotence = true
+        messageSendMaxRetries = 10
+        messageTimeoutMs = 30000
+        lingerMs = 10
+        batchNumMessages = 1000
+        queueBufferingMaxMs = 50
+        queueBufferingMaxKbytes = 102400
+        compressionType = "lz4"
+        socketKeepaliveEnable = true
+        connectionsMaxIdleMs = 300000
+        statisticsIntervalMs = 60000
+        goDeliveryReportFields = "key,value,headers"
+        partitioner = "murmur2_random"
+    
+    [kafka.producer.recorder]
+        clientId = "qywx-producer-recorder"
+        acks = "all"
+        enableIdempotence = true
+        messageSendMaxRetries = 10
+        messageTimeoutMs = 30000
+        lingerMs = 10
+        batchNumMessages = 1000
+        queueBufferingMaxMs = 50
+        queueBufferingMaxKbytes = 102400
+        compressionType = "lz4"
+        socketKeepaliveEnable = true
+        connectionsMaxIdleMs = 300000
+        statisticsIntervalMs = 60000
+        goDeliveryReportFields = "key,value,headers"
+        partitioner = "murmur2_random"
+        messageMaxBytes = 6291456
+
+    [kafka.consumer.chat]
+        debug = "conf"
+        groupId = "qywx-consumer-group"
+        partitionAssignmentStrategy = "cooperative-sticky"
+        enableAutoCommit = false
+        enableAutoOffsetStore = false
+        autoOffsetReset = "earliest"
+        sessionTimeoutMs = 30000
+        heartbeatIntervalMs = 3000
+        maxPollIntervalMs = 600000
+        fetchMinBytes = 128
+        fetchWaitMaxMs = 50
+        statisticsIntervalMs = 60000
+        socketKeepaliveEnable = true
+    
+    [kafka.consumer.recorder]
+        debug = "conf"
+        groupId = "qywx-recorder-group"
+        partitionAssignmentStrategy = "cooperative-sticky"
+        enableAutoCommit = false
+        enableAutoOffsetStore = false
+        autoOffsetReset = "earliest"
+        sessionTimeoutMs = 30000
+        heartbeatIntervalMs = 3000
+        maxPollIntervalMs = 600000
+        fetchMinBytes = 1024
+        fetchWaitMaxMs = 50
+        statisticsIntervalMs = 60000
+        socketKeepaliveEnable = true
+        maxPartitionFetchBytes = 6291456
+        fetchMaxBytes = 67108864
+
+    [kafka.chatDLQ]
+        topic = "qywx-kf-ipang-dlq"
+        clientIdSuffix = "-dlq"
+
+    [kafka.recorderDLQ]
+        topic = "qywx-kf-ipang-recorder-dlq"
+        clientIdSuffix = "-dlq"
+
+    [kafka.topics.chat]
+        name = "qywx-kf-ipang"
+
+    [kafka.topics.callbackInbound]
+        name = "wx_raw_event"
+
+    [kafka.topics.recorder]
+        name = "qywx-recorder"
+        numPartitions = 24
+        replicationFactor = 3
+        cleanupPolicy = "delete"
+        retentionMs = 604800000
+        maxMessageBytes = 6291456
+
+[fetcher]
+    enabled = true
+    keyPrefix = "kf"
+    leaseTTLSeconds = 15
+    pollIntervalMs = 1000
+    kafkaGroupId = "kf-fetcher-group"
+    kafkaClientId = "kf-fetcher-client"
+    localShadowPath = "var/kf_cursor_wk6Gh8CQAAH3T-AxpjWbx8Ybhw84AFnQ.json"
+
+    [fetcher.redis]
+        useSentinel = true
+        addr = "192.168.57.40:6379"
+        password = ""
+        db = 2
+        sentinelAddrs = ["192.168.57.40:26379", "192.168.57.41:26379", "192.168.57.42:26379"]
+        sentinelPassword = ""
+        masterName = "mymaster"
+
+[mysql]
+    dsn = "admin:AdminPass#2025@tcp(192.168.57.60:3306)/ipang?parseTime=true&loc=Asia%2FShanghai&charset=utf8mb4"
+    maxOpenConns = 100
+    maxIdleConns = 10
+    connMaxIdleTime = 600
+    connMaxLifetime = 3600
 
 # MiniMax智能体配置（快速响应优化版）
 [minimax]
