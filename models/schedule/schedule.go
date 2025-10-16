@@ -3,9 +3,9 @@ package schedule
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"qywx/infrastructures/common"
@@ -15,6 +15,7 @@ import (
 	"qywx/infrastructures/wxmsg/kefu"
 	"qywx/models/message"
 	"qywx/models/msgqueue"
+	"qywx/models/thirdpart/gaode"
 	"qywx/models/thirdpart/minimax"
 )
 
@@ -44,6 +45,7 @@ type FurtherProcessTask struct {
 	ConversationHistory []minimax.Message      // 对话历史副本
 	RawConverHistory    []minimax.RawMsg       // 纯粹的对话历史，用于构建Ipang API的Qas参数
 	Keywords            map[string]interface{} // 累积的关键词（双引擎合并结果）
+	Anchor              map[string]interface{} // 当前锚点信息（若存在）
 }
 
 // Scheduler 消息调度器
@@ -61,9 +63,6 @@ type Scheduler struct {
 	mqRuntime        *msgqueue.KafkaRuntime
 	recorderProducer RecorderProducer // Recorder Kafka Producer
 	recorderTopic    string           // Recorder Topic名称
-
-	// 消息分发计数器（原子操作，线程安全）
-	dispatchCount atomic.Int64
 }
 
 // Processor 用户消息处理器
@@ -89,7 +88,9 @@ type Processor struct {
 	currentOpenKFID string // 当前对话的客服账号ID
 
 	// 压测相关
-	seqChecker *SequenceChecker // 消息顺序检测器（压测模式）
+	seqChecker       *SequenceChecker // 消息顺序检测器（压测模式）
+	receivedMsgIDs   []string         // 接收到的消息ID列表（用于压测观察）
+	receivedMsgIDsMu sync.Mutex       // 保护receivedMsgIDs的锁
 
 	// 并发关键词提取架构
 	keywordsChan         chan string            // 用户消息队列（缓冲100）
@@ -117,6 +118,9 @@ type Processor struct {
 
 	// 对于同一次pending，仅拦截一次end
 	pendingEndIntercepted bool
+
+	// 微地标兜底拦截只触发一次
+	microLocAskIntercepted bool
 
 	// 购房意向：新房/二手房/All（默认All）
 	purchaseIntent   PurchaseIntent
@@ -319,12 +323,6 @@ func (s *Scheduler) dispatcher() {
 
 // DispatchInbound 将消息交给用户级 processor，供 Kafka runtime 复用。
 func (s *Scheduler) DispatchInbound(in *message.InboundMsg) {
-	// 开始计时：记录消息分发开始时间
-	startTime := time.Now()
-
-	// 递增消息分发计数器
-	count := s.dispatchCount.Add(1)
-
 	if in == nil {
 		return
 	}
@@ -369,17 +367,15 @@ func (s *Scheduler) DispatchInbound(in *message.InboundMsg) {
 		case processor.resetTimer <- struct{}{}:
 		default:
 		}
-		// 结束计时：消息成功分发
-		elapsed := time.Since(startTime)
-		log.GetInstance().Sugar.Debugf("消息分发成功: count=%d, user=%s, type=%s, elapsed=%v",
-			count, msg.ExternalUserID, msg.MsgType, elapsed)
-	case <-time.After(1 * time.Second):
-		// 结束计时：消息分发超时
-		elapsed := time.Since(startTime)
-		log.GetInstance().Sugar.Warnf("消息分发超时: count=%d, user=%s, elapsed=%v",
-			count, msg.ExternalUserID, elapsed)
+		// 成功入队列即可调用ACK，不让单个用户的处理时延拖累整个Kafka的推送性能
 		if in.Ack != nil {
-			in.Ack(false)
+			in.Ack(true)
+		}
+	case <-time.After(3 * time.Second):
+		log.GetInstance().Sugar.Warnf("消息分发超时: user=%s", msg.ExternalUserID)
+		if in.Ack != nil {
+			// 正常消费掉这条消息
+			in.Ack(true)
 		}
 	}
 }
@@ -440,6 +436,7 @@ func (s *Scheduler) getOrCreateProcessor(userID string) *Processor {
 		rawConverHistory:    make([]minimax.RawMsg, 0),
 		keywordExtractor:    NewKeywordExtractorService(s.recorderProducer, s.recorderTopic),
 		seqChecker:          NewSequenceChecker(), // 初始化顺序检测器
+		receivedMsgIDs:      make([]string, 0),    // 初始化消息ID列表
 		// 并发关键词提取初始化
 		keywordsChan: make(chan string, 100), // 缓冲channel
 		keywordsMap:  make(map[string]interface{}),
@@ -518,15 +515,191 @@ func (s *Scheduler) handleFurtherTask(task *FurtherProcessTask) {
 	// 创建关键字提取服务
 	extractor := NewKeywordExtractorService(s.recorderProducer, s.recorderTopic)
 
+	// 合并对话历史中的非LLM回复，构造给Ipang使用的完整问答对
+	mergedRawHistory := mergeRawHistoryForIpang(task.ConversationHistory, task.RawConverHistory)
+
+	if anchor := task.Anchor; anchor != nil {
+		anchorName := strings.TrimSpace(fmt.Sprint(anchor["name"]))
+		if anchorName != "" {
+			city := cityFromKeywords(task.Keywords)
+			service, err := gaode.NewService()
+			if err != nil {
+				log.GetInstance().Sugar.Warnf("Gaode service init failed for user %s anchor %s: %v", task.UserID, anchorName, err)
+			} else {
+				ctx := s.ctx
+				if ctx == nil {
+					ctx = context.Background()
+				}
+
+				geo, err := service.GeocodeFirst(ctx, anchorName, city)
+				if err != nil {
+					log.GetInstance().Sugar.Warnf("Gaode geocode failed for user %s anchor %s city %s: %v", task.UserID, anchorName, city, err)
+				} else if geo != nil {
+					if coord := strings.TrimSpace(geo.Location); coord != "" {
+						log.GetInstance().Sugar.Infof("Gaode geocode result for user %s anchor %s city %s: %+v", task.UserID, anchorName, city, geo)
+						anchor["location"] = coord
+					}
+				}
+			}
+
+			if radius := anchorRadiiMeters(anchor); radius > 0 {
+				anchor["radius_search_m"] = radius
+			}
+
+			updateAnchorInKeywords(task.Keywords, anchor)
+		} else {
+			log.GetInstance().Sugar.Warn("Anchor detected without name for user: ", task.UserID)
+		}
+	}
+
 	// 4.3 优先使用聚合的关键词，避免重复提取（简单实用原则）
 	if task.Keywords != nil && len(task.Keywords) > 0 {
 		log.GetInstance().Sugar.Info("Using aggregated keywords for user: ", task.UserID, ", dimensions: ", len(task.Keywords))
-		extractor.CallIpangAPIFromKeywords(task.UserID, task.OpenKFID, task.Keywords, task.RawConverHistory)
+		extractor.CallIpangAPIFromKeywords(task.UserID, task.OpenKFID, task.Keywords, mergedRawHistory)
 	} else {
 		// 降级到历史提取（兼容性保证）
 		log.GetInstance().Sugar.Info("No aggregated keywords, fallback to conversation history extraction for user: ", task.UserID)
-		extractor.ExtractAndCallIpangAPI(task.UserID, task.OpenKFID, task.ConversationHistory, task.RawConverHistory)
+		extractor.ExtractAndCallIpangAPI(task.UserID, task.OpenKFID, task.ConversationHistory, mergedRawHistory)
 	}
+}
+
+func mergeRawHistoryForIpang(conv []minimax.Message, raw []minimax.RawMsg) []minimax.RawMsg {
+	if len(conv) == 0 {
+		return raw
+	}
+
+	placeholder := "小胖正在思考中，很快给您回复哦…"
+	merged := make([]minimax.RawMsg, 0, len(conv))
+
+	for _, msg := range conv {
+		content := strings.TrimSpace(extractMessageText(msg.Content))
+		if content == "" {
+			continue
+		}
+
+		switch msg.Role {
+		case "user":
+			merged = append(merged, minimax.RawMsg{
+				Source:  "用户",
+				Content: content,
+			})
+		case "assistant":
+			if content == placeholder {
+				continue
+			}
+			merged = append(merged, minimax.RawMsg{
+				Source:  "AI",
+				Content: content,
+			})
+		default:
+			continue
+		}
+	}
+
+	if len(merged) == 0 {
+		return raw
+	}
+
+	return merged
+}
+
+func extractMessageText(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []minimax.ContentItem:
+		var builder strings.Builder
+		for _, item := range v {
+			if item.Type != "text" {
+				continue
+			}
+			txt := strings.TrimSpace(item.Text)
+			if txt == "" {
+				continue
+			}
+			if builder.Len() > 0 {
+				builder.WriteString("\n")
+			}
+			builder.WriteString(txt)
+		}
+		return builder.String()
+	default:
+		return ""
+	}
+}
+
+func anchorRadiiMeters(anchor map[string]interface{}) int {
+	if anchor == nil {
+		return 0
+	}
+
+	keys := []string{
+		"radius_search_m",
+		"radius_m",
+		"radius_max_m",
+		"radius_min_m",
+	}
+
+	max := 0
+	for _, key := range keys {
+		if radius := toPositiveInt(anchor[key]); radius > max {
+			max = radius
+		}
+	}
+	return max
+}
+
+func updateAnchorInKeywords(keywords map[string]interface{}, anchor map[string]interface{}) {
+	if keywords == nil || anchor == nil {
+		return
+	}
+	loc, _ := keywords["location"].(map[string]interface{})
+	if loc == nil {
+		loc = make(map[string]interface{})
+	}
+	loc["anchor"] = anchor
+	keywords["location"] = loc
+}
+
+func cityFromKeywords(keywords map[string]interface{}) string {
+	city := "上海"
+	if keywords == nil {
+		return city
+	}
+	loc, ok := keywords["location"].(map[string]interface{})
+	if !ok || loc == nil {
+		return city
+	}
+	if province, ok := loc["province"].(string); ok && strings.TrimSpace(province) != "" {
+		city = strings.TrimSpace(province)
+	}
+	return city
+}
+
+func toPositiveInt(v interface{}) int {
+	switch val := v.(type) {
+	case int:
+		if val > 0 {
+			return val
+		}
+	case int64:
+		if val > 0 {
+			return int(val)
+		}
+	case float64:
+		if val > 0 {
+			return int(val)
+		}
+	case float32:
+		if val > 0 {
+			return int(val)
+		}
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil && f > 0 {
+			return int(f)
+		}
+	}
+	return 0
 }
 
 // removeProcessor 移除processor（processor退出时调用）

@@ -8,7 +8,7 @@ import (
 
 const (
 	// 消息生成常量
-	messageBatchSize  = 1000 // 每批生成 1000 条消息
+	messageBatchSize  = 5000 // 每批生成 5000 条消息
 	textContentLength = 50   // 每条消息 50 个汉字
 )
 

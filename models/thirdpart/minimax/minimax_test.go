@@ -33,7 +33,7 @@ func TestNewClientWithCustomConfig(t *testing.T) {
 		if client == nil {
 			t.Error("NewClientWithCustomConfig() returned nil client with valid config")
 		}
-		
+
 		// 验证自定义参数
 		if client.GetModel() != "MiniMax-Text-01" {
 			t.Errorf("Expected model MiniMax-Text-01, got %s", client.GetModel())

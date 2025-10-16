@@ -3,6 +3,7 @@ package schedule
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -118,6 +119,15 @@ func (a *IpangAdapter) Transform(extraction *KeywordExtractionResult, rawConverH
 	result.Params.Size = size
 	if areaFilter != nil {
 		result.PostFilters = append(result.PostFilters, *areaFilter)
+	}
+
+	// 5.1 Anchor转换：提取经纬度和半径
+	if locationStr, radiusStr := a.extractAnchorParams(extraction.Location); locationStr != "" {
+		log.GetInstance().Sugar.Infof("Anchor params resolved: location=%s radius=%s", locationStr, radiusStr)
+		result.Params.Location = locationStr
+		if radiusStr != "" {
+			result.Params.Radius = radiusStr
+		}
 	}
 
 	// 6. Qas转换：rawConverHistory → Qas（问答对）
@@ -495,6 +505,48 @@ func (a *IpangAdapter) extractSize(areas []AreaInfo) (string, *PostFilter) {
 	return "", nil
 }
 
+func (a *IpangAdapter) extractAnchorParams(locations []LocationInfo) (string, string) {
+	if len(locations) == 0 {
+		return "", ""
+	}
+
+	for i := len(locations) - 1; i >= 0; i-- {
+		loc := locations[i]
+		if loc.Anchor == nil {
+			continue
+		}
+		anchor := loc.Anchor
+
+		location := strings.TrimSpace(anchor.Location)
+		if location == "" {
+			continue
+		}
+
+		radius := ""
+		switch {
+		case anchor.RadiusSearchMeters > 0:
+			radius = formatRadiusMeters(anchor.RadiusSearchMeters)
+		case anchor.RadiusMeters > 0:
+			radius = formatRadiusMeters(anchor.RadiusMeters)
+		case anchor.RadiusMaxMeters > 0:
+			radius = formatRadiusMeters(anchor.RadiusMaxMeters)
+		case anchor.RadiusMinMeters > 0:
+			radius = formatRadiusMeters(anchor.RadiusMinMeters)
+		}
+
+		return location, radius
+	}
+
+	return "", ""
+}
+
+func formatRadiusMeters(val float64) string {
+	if val <= 0 {
+		return ""
+	}
+	return strconv.Itoa(int(math.Round(val)))
+}
+
 // ApplyPostFilters 应用后处理筛选
 // TODO: 需要根据新的QueryResponse结构重新实现
 // 当前版本暂时注释，因为ipang.Property已经不存在
@@ -706,6 +758,7 @@ func (a *IpangAdapter) isEmptyParams(params *ipang.QueryParams) bool {
 	return params.Area == "" &&
 		params.Amount == "" &&
 		params.Count == "" &&
+		params.Location == "" &&
 		params.Plate == "" &&
 		params.Size == ""
 }

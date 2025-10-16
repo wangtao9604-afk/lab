@@ -1,0 +1,10 @@
+2025-10-11T01:22:00.493+0800	DEBUG	runtime/asm_arm64.s:1223	消息拉取耗时: count=2, topic=qywx-kf-ipang, partition=13, offset=25256, userId=wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB, msgId= 1, elapsed=17.583µs
+2025-10-11T01:22:00.497+0800	DEBUG	runtime/asm_arm64.s:1223	消息拉取耗时: count=30, topic=qywx-kf-ipang, partition=13, offset=25284, userId=wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB, msgId= 2, elapsed=3.375µs
+2025-10-11T01:22:00.494+0800	INFO	msgqueue/kafka_runtime.go:187	下刷 partition: 13, next value: 25256
+2025-10-11T01:22:02.472+0800	INFO	msgqueue/kafka_runtime.go:187	下刷 partition: 13, next value: 25284
+2025-10-11T01:22:02.472+0800	INFO	schedule/schedule.go:366	Created new processor for user: wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB
+2025-10-11T01:22:02.472+0800	DEBUG	msgqueue/partition_sequencer.go:86	消息分发成功: count=30, user=wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB, type=text, elapsed=58.5µs
+2025-10-11T01:22:02.472+0800	INFO	runtime/asm_arm64.s:1223	Keywords extraction worker started for user: wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB
+2025-10-11T01:22:02.472+0800	INFO	runtime/asm_arm64.s:1223	Processor started for user: wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB
+2025-10-11T01:22:02.472+0800	DEBUG	runtime/asm_arm64.s:1223	Reset processor lifetime for user: wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB
+2025-10-11T01:22:02.472+0800	INFO	schedule/processor.go:237	User wm6Gh8CQAAsuJsOlFi4gnjKzn4DtF9NB received MsgIDs: [2] (total: 1)

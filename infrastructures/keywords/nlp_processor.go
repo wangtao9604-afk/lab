@@ -804,7 +804,6 @@ func (nlp *AdvancedNLPProcessor) parseRoomLayout(match []string) interface{} {
 	// 16: (\d+)室 - 单独的阿拉伯数字室
 	// 17: ([一二三四五六七八九十两壹贰叁肆伍陆柒捌玖拾])室 - 单独的中文数字室
 
-
 	// 查找非空的匹配组
 	for i := 1; i < len(match); i++ {
 		if match[i] != "" {

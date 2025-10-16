@@ -95,7 +95,71 @@ type ipangConfig struct {
 
 // keywordsConfig 关键词提取器配置
 type keywordsConfig struct {
-	RentalFilterStrategy string `toml:"rentalFilterStrategy"` // 租售过滤策略：strict|ignore|none，默认strict
+	RentalFilterStrategy string  `toml:"rentalFilterStrategy"` // 租售过滤策略：strict|ignore|none，默认strict
+	TravelSpeedWalkMpm   float64 `toml:"travelSpeedWalkMpm"`
+	TravelSpeedBikeMpm   float64 `toml:"travelSpeedBikeMpm"`
+	TravelSpeedDriveMpm  float64 `toml:"travelSpeedDriveMpm"`
+}
+
+func (kc *keywordsConfig) UnmarshalTOML(v interface{}) error {
+	data, ok := v.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("keywords: expected table, got %T", v)
+	}
+
+	if val, ok := data["rentalFilterStrategy"]; ok {
+		str, ok := val.(string)
+		if !ok {
+			return fmt.Errorf("keywords.rentalFilterStrategy must be string, got %T", val)
+		}
+		kc.RentalFilterStrategy = str
+	}
+
+	if val, ok := data["travelSpeedWalkMpm"]; ok {
+		f, err := decodeTomlNumber(val)
+		if err != nil {
+			return fmt.Errorf("keywords.travelSpeedWalkMpm: %w", err)
+		}
+		kc.TravelSpeedWalkMpm = f
+	}
+
+	if val, ok := data["travelSpeedBikeMpm"]; ok {
+		f, err := decodeTomlNumber(val)
+		if err != nil {
+			return fmt.Errorf("keywords.travelSpeedBikeMpm: %w", err)
+		}
+		kc.TravelSpeedBikeMpm = f
+	}
+
+	if val, ok := data["travelSpeedDriveMpm"]; ok {
+		f, err := decodeTomlNumber(val)
+		if err != nil {
+			return fmt.Errorf("keywords.travelSpeedDriveMpm: %w", err)
+		}
+		kc.TravelSpeedDriveMpm = f
+	}
+
+	return nil
+}
+
+func decodeTomlNumber(v interface{}) (float64, error) {
+	switch n := v.(type) {
+	case int64:
+		return float64(n), nil
+	case float64:
+		return n, nil
+	case nil:
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("unsupported numeric type %T", v)
+	}
+}
+
+// gaodeConfig 高德地图API配置
+type gaodeConfig struct {
+	APIKey  string `toml:"apiKey"`  // 高德地图API密钥
+	BaseURL string `toml:"baseUrl"` // API基础URL，默认https://restapi.amap.com
+	Timeout int    `toml:"timeout"` // 请求超时（秒），默认10
 }
 
 // KafkaProducerConfig 定义 Kafka Producer 的配置项。
@@ -223,7 +287,6 @@ type QywxConfig struct {
 	Platform       int              `toml:"platform"`    // 平台类型：1=web, 2=mobile, 3=ignore
 	Environment    string           `toml:"environment"` // 环境配置 [dev, prod, container]
 	Domain         string           `toml:"domain"`      // 域名
-	Stress         bool             `toml:"stress"`      // 压测模式，默认 false
 	LogConfig      log              `toml:"log"`
 	Redises        map[string]redis `toml:"redises"`
 	SuiteConfig    suiteConfig      `toml:"suite"`
@@ -233,6 +296,7 @@ type QywxConfig struct {
 	MiniMaxConfig  miniMaxConfig    `toml:"minimax"`  // MiniMax配置
 	IpangConfig    ipangConfig      `toml:"ipang"`    // Ipang配置
 	KeywordsConfig keywordsConfig   `toml:"keywords"` // Keywords配置
+	GaodeConfig    gaodeConfig      `toml:"gaode"`    // Gaode配置
 	Kafka          kafkaConfig      `toml:"kafka"`    // Kafka配置
 	MySQL          mysqlConfig      `toml:"mysql"`    // MySQL配置
 	Fetcher        fetcherConfig    `toml:"fetcher"`  // Fetcher配置
@@ -325,6 +389,23 @@ func parseConfig(path string) (*QywxConfig, error) {
 	// 设置Keywords配置默认值
 	if conf.KeywordsConfig.RentalFilterStrategy == "" {
 		conf.KeywordsConfig.RentalFilterStrategy = "strict" // 默认严格过滤模式
+	}
+	if conf.KeywordsConfig.TravelSpeedWalkMpm <= 0 {
+		conf.KeywordsConfig.TravelSpeedWalkMpm = 80
+	}
+	if conf.KeywordsConfig.TravelSpeedBikeMpm <= 0 {
+		conf.KeywordsConfig.TravelSpeedBikeMpm = 230
+	}
+	if conf.KeywordsConfig.TravelSpeedDriveMpm <= 0 {
+		conf.KeywordsConfig.TravelSpeedDriveMpm = 500
+	}
+
+	// 设置Gaode配置默认值
+	if conf.GaodeConfig.BaseURL == "" {
+		conf.GaodeConfig.BaseURL = "https://restapi.amap.com"
+	}
+	if conf.GaodeConfig.Timeout <= 0 {
+		conf.GaodeConfig.Timeout = 10 // 默认10秒超时
 	}
 
 	conf.Kafka.setDefaults()

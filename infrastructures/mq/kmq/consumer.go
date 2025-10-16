@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	qconfig "qywx/infrastructures/config"
@@ -26,6 +25,7 @@ type TopicPartitionKey struct {
 type LifecycleHooks struct {
 	OnAssigned func(topic string, partition int32, startOffset int64)
 	OnRevoked  func(topic string, partition int32)
+	OnLost     func(topic string, partition int32)
 }
 
 // Consumer 封装 confluent Kafka consumer，开启 cooperative-sticky 分配、手动偏移控制与分区提交闸门。
@@ -47,8 +47,10 @@ type Consumer struct {
 
 	groupID string
 
-	// 消息拉取计数器（原子操作，线程安全）
-	messageCount atomic.Int64
+	// —— 埋点辅助：记录每个分区的 start、以及是否已记录过 FIRST-POLL —— //
+	assignStart     map[TopicPartitionKey]int64
+	firstPollLogged map[TopicPartitionKey]bool
+	firstPollMu     sync.Mutex
 }
 
 // ConsumerOptions 控制消费并发及批量提交参数。
@@ -286,10 +288,12 @@ func NewConsumer(brokers, groupID string, opts ...ConsumerOption) (*Consumer, er
 	}
 
 	wc := &Consumer{
-		c:       c,
-		gates:   make(map[TopicPartitionKey]*PartitionCommitGate),
-		opts:    options,
-		groupID: effectiveGroupID,
+		c:               c,
+		gates:           make(map[TopicPartitionKey]*PartitionCommitGate),
+		opts:            options,
+		groupID:         effectiveGroupID,
+		assignStart:     make(map[TopicPartitionKey]int64, 64),
+		firstPollLogged: make(map[TopicPartitionKey]bool, 64),
 	}
 
 	if options.MaxInflightGlobal > 0 {
@@ -390,87 +394,141 @@ func (cc *Consumer) Subscribe(topics []string) error {
 		switch ev := e.(type) {
 		case kafka.AssignedPartitions:
 			ReportRebalance(cc.groupID, "assigned")
+
+			// 先取 committed，构建查找表
 			committed, err := c.Committed(ev.Partitions, 5000)
 			committedMap := make(map[TopicPartitionKey]int64)
 			if err == nil {
 				for _, ctp := range committed {
-					if ctp.Offset >= 0 && ctp.Topic != nil {
-						committedMap[TopicPartitionKey{Topic: *ctp.Topic, Partition: ctp.Partition}] = int64(ctp.Offset)
+					if ctp.Topic != nil && ctp.Offset >= 0 {
+						committedMap[TopicPartitionKey{
+							Topic:     *ctp.Topic,
+							Partition: ctp.Partition,
+						}] = int64(ctp.Offset) // confluent 语义：下一条要读
 					}
 				}
 			} else {
 				qlog.GetInstance().Sugar.Warnf("Failed to get committed offsets: %v", err)
 			}
 
+			// 我们会按“带偏移”的分配入组
+			parts := make([]kafka.TopicPartition, 0, len(ev.Partitions))
+
 			cc.gatesMu.Lock()
 			for _, tp := range ev.Partitions {
-				key := TopicPartitionKey{Topic: *tp.Topic, Partition: tp.Partition}
-
-				var start int64
-				if committedOffset, ok := committedMap[key]; ok {
-					start = committedOffset
+				topic := ""
+				if tp.Topic != nil {
+					topic = *tp.Topic
 				} else {
-					low, _, watermarkErr := c.QueryWatermarkOffsets(*tp.Topic, tp.Partition, 5000)
-					if watermarkErr != nil {
-						qlog.GetInstance().Sugar.Warnf("查询 %s:%d 水位失败，尝试使用缓存值: %v",
-							*tp.Topic, tp.Partition, watermarkErr)
-						low2, _, getErr := c.GetWatermarkOffsets(*tp.Topic, tp.Partition)
-						if getErr == nil && low2 >= 0 {
-							start = low2
-							qlog.GetInstance().Sugar.Infof("使用缓存的低水位 %d 初始化 %s:%d", low2, *tp.Topic, tp.Partition)
-						} else {
-							start = 0
-							qlog.GetInstance().Sugar.Errorf("严重警告：%s:%d 的水位查询全部失败，退化为 0。QueryErr=%v GetErr=%v",
-								*tp.Topic, tp.Partition, watermarkErr, getErr)
-						}
+					qlog.GetInstance().Sugar.Errorf("AssignedPartitions: nil topic for partition=%d, fallback start=0", tp.Partition)
+				}
+
+				key := TopicPartitionKey{Topic: topic, Partition: tp.Partition}
+
+				// 计算起点：优先 committed → 否则低水位（Query → Get 缓存兜底）→ 实在不行 fallback=0
+				var start int64 = 0
+				if topic != "" {
+					if committedOffset, ok := committedMap[key]; ok {
+						start = committedOffset
 					} else {
-						start = low
-						qlog.GetInstance().Sugar.Debugf("使用实时低水位 %d 初始化 %s:%d", low, *tp.Topic, tp.Partition)
+						low, _, watermarkErr := c.QueryWatermarkOffsets(topic, tp.Partition, 5000)
+						if watermarkErr != nil {
+							qlog.GetInstance().Sugar.Warnf("查询 %s:%d 水位失败，尝试使用缓存值: %v",
+								topic, tp.Partition, watermarkErr)
+							low2, _, getErr := c.GetWatermarkOffsets(topic, tp.Partition)
+							if getErr == nil && low2 >= 0 {
+								start = low2
+								qlog.GetInstance().Sugar.Infof("使用缓存的低水位 %d 初始化 %s:%d", low2, topic, tp.Partition)
+							} else {
+								start = 0
+								qlog.GetInstance().Sugar.Errorf("严重警告：%s:%d 的水位查询全部失败，退化为 0。QueryErr=%v GetErr=%v",
+									topic, tp.Partition, watermarkErr, getErr)
+							}
+						} else {
+							start = low
+							qlog.GetInstance().Sugar.Debugf("使用实时低水位 %d 初始化 %s:%d", low, topic, tp.Partition)
+						}
 					}
 				}
 
-				cc.gates[key] = NewPartitionCommitGate(*tp.Topic, tp.Partition, start)
-				qlog.GetInstance().Sugar.Debugf("为 %s:%d 初始化提交闸门，起始偏移 %d", *tp.Topic, tp.Partition, start)
-				ReportGateBacklog(*tp.Topic, tp.Partition, 0)
+				// 1) 为该分区初始化 Gate（提交闸门）
+				cc.gates[key] = NewPartitionCommitGate(topic, tp.Partition, start)
+				qlog.GetInstance().Sugar.Debugf("为 %s:%d 初始化提交闸门，起始偏移 %d", topic, tp.Partition, start)
+				ReportGateBacklog(topic, tp.Partition, 0)
 
-				// 通知上层（例如：在 Scheduler 内为该分区创建 partitionSequencer）
+				// 2) 埋点：记录 ASSIGN 起点（用于 FIRST-POLL 对比）
+				cc.assignStart[key] = start
+				qlog.GetInstance().Sugar.Infof("[ASSIGN] %s:%d start=%d", topic, tp.Partition, start)
+
+				// 3) 通知上层：用同一 start 预创建 sequencer（KafkaRuntime.OnAssigned 里 newPartitionSequencer(start, ... )）
 				if cc.opts.hooks.OnAssigned != nil {
-					cc.opts.hooks.OnAssigned(*tp.Topic, tp.Partition, start)
+					cc.opts.hooks.OnAssigned(topic, tp.Partition, start)
 				}
+
+				// 4) 关键：把我们计算的 start 显式写回分配位点，确保 Poll 的第一批消息与 Gate/Sequencer 起点对齐
+				tp.Offset = kafka.Offset(start)
+				parts = append(parts, tp)
 			}
 			cc.gatesMu.Unlock()
-			return c.IncrementalAssign(ev.Partitions)
+
+			// cooperative-sticky：使用“带 offset”的增量分配
+			return c.IncrementalAssign(parts)
 
 		case kafka.RevokedPartitions:
-			ReportRebalance(cc.groupID, "revoked")
+			lost := c.AssignmentLost()
+			if lost {
+				ReportRebalance(cc.groupID, "lost")
+			} else {
+				ReportRebalance(cc.groupID, "revoked")
+			}
+
 			cc.gatesMu.Lock()
 			for _, tp := range ev.Partitions {
-				key := TopicPartitionKey{Topic: *tp.Topic, Partition: tp.Partition}
-
-				drained := cc.waitPartitionDrain(key)
-				if !drained {
-					qlog.GetInstance().Sugar.Warnf("Partition drain timeout before revoke: %s:%d (timeout=%v)", key.Topic, key.Partition, cc.opts.PartitionDrainTimeout)
+				topic := ""
+				if tp.Topic != nil {
+					topic = *tp.Topic
 				}
-				if g, ok := cc.gates[key]; ok {
-					if err := g.CommitContiguous(c); err != nil {
-						qlog.GetInstance().Sugar.Warnf("Commit contiguous on revoke failed for %s:%d: %v", key.Topic, key.Partition, err)
-					}
-					delete(cc.gates, key)
-					ReportGateBacklog(key.Topic, key.Partition, 0)
-				}
-				cc.cleanupPartitionState(key)
+				key := TopicPartitionKey{Topic: topic, Partition: tp.Partition}
 
-				if cc.opts.hooks.OnRevoked != nil {
-					topic := ""
-					if tp.Topic != nil {
-						topic = *tp.Topic
+				if lost {
+					if _, ok := cc.gates[key]; ok {
+						delete(cc.gates, key)
+						ReportGateBacklog(topic, tp.Partition, 0)
 					}
-					cc.opts.hooks.OnRevoked(topic, tp.Partition)
+					cc.cleanupPartitionState(key)
+
+					// 清理埋点状态
+					delete(cc.assignStart, key)
+					cc.clearFirstPollMark(key)
+
+					if cc.opts.hooks.OnLost != nil {
+						cc.opts.hooks.OnLost(topic, tp.Partition)
+					}
+				} else {
+					drained := cc.waitPartitionDrain(key)
+					if !drained {
+						qlog.GetInstance().Sugar.Warnf("Partition drain timeout before revoke: %s:%d (timeout=%v)", key.Topic, key.Partition, cc.opts.PartitionDrainTimeout)
+					}
+					if g, ok := cc.gates[key]; ok {
+						if err := g.CommitContiguous(c); err != nil {
+							qlog.GetInstance().Sugar.Warnf("Commit contiguous on revoke failed for %s:%d: %v", key.Topic, key.Partition, err)
+						}
+						delete(cc.gates, key)
+						ReportGateBacklog(key.Topic, key.Partition, 0)
+					}
+					cc.cleanupPartitionState(key)
+
+					// 清理埋点状态
+					delete(cc.assignStart, key)
+					cc.clearFirstPollMark(key)
+
+					if cc.opts.hooks.OnRevoked != nil {
+						cc.opts.hooks.OnRevoked(topic, tp.Partition)
+					}
 				}
 			}
 			cc.gatesMu.Unlock()
 			return c.IncrementalUnassign(ev.Partitions)
-
 		}
 		return nil
 	})
@@ -600,17 +658,82 @@ func (cc *Consumer) PollAndDispatch(ctx context.Context, handler MessageHandler,
 		switch e := ev.(type) {
 		case *kafka.Message:
 			part := e.TopicPartition.Partition
-			topic := *e.TopicPartition.Topic
+			topic := ""
+			if e.TopicPartition.Topic != nil {
+				topic = *e.TopicPartition.Topic
+			} else {
+				qlog.GetInstance().Sugar.Warnf("Message with nil topic, partition=%d offset=%d", part, int64(e.TopicPartition.Offset))
+			}
 			off := int64(e.TopicPartition.Offset)
 
 			key := TopicPartitionKey{Topic: topic, Partition: part}
+
+			// 埋点：每个分区只打印一次 FIRST-POLL
+			cc.firstPollLogOnce(key, off)
 
 			cc.gatesMu.RLock()
 			gate := cc.gates[key]
 			cc.gatesMu.RUnlock()
 			if gate == nil {
-				qlog.GetInstance().Sugar.Warnf("未找到 %s:%d 对应的提交闸门", topic, part)
-				continue
+				// 等待 Assigned 回调把 gate 放入（通常几十毫秒内完成）
+				const (
+					maxWaitIters = 100
+					waitStep     = 10 * time.Millisecond
+				)
+				waited := 0
+				for i := 0; i < maxWaitIters; i++ {
+					time.Sleep(waitStep)
+					waited++
+					cc.gatesMu.RLock()
+					gate = cc.gates[key]
+					cc.gatesMu.RUnlock()
+					if gate != nil {
+						break
+					}
+				}
+				if gate == nil {
+					// —— 兜底：用“与 Assigned 相同”的规则计算 start —— //
+					start := int64(-1)
+					tp := kafka.TopicPartition{Topic: &topic, Partition: part}
+
+					if committed, err := cc.c.Committed([]kafka.TopicPartition{tp}, 5000); err == nil && len(committed) == 1 {
+						co := committed[0].Offset
+						if co >= 0 {
+							start = int64(co) // Committed = 下一条要读
+						}
+					}
+					if start < 0 {
+						if low, _, err := cc.c.QueryWatermarkOffsets(topic, part, 5000); err == nil {
+							start = low
+						} else {
+							if low2, _, err2 := cc.c.GetWatermarkOffsets(topic, part); err2 == nil && low2 >= 0 {
+								start = low2
+							} else {
+								// 实在拿不到，用当前 off 兜底，但要打强告警
+								start = off
+								qlog.GetInstance().Sugar.Errorf(
+									"[GATE] resolve start failed, fallback to off=%d for %s:%d (waited=%d*%s): queryErr=%v getErr=%v",
+									off, topic, part, waited, waitStep, err, err2,
+								)
+							}
+						}
+					}
+
+					qlog.GetInstance().Sugar.Warnf(
+						"[GATE] Lazy-create commit gate for %s:%d start=%d (msg.off=%d, waited=%d*%s)",
+						topic, part, start, off, waited, waitStep,
+					)
+
+					cc.gatesMu.Lock()
+					if g2 := cc.gates[key]; g2 == nil {
+						gate = NewPartitionCommitGate(topic, part, start)
+						cc.gates[key] = gate
+						ReportGateBacklog(topic, part, 0)
+					} else {
+						gate = g2
+					}
+					cc.gatesMu.Unlock()
+				}
 			}
 
 			gate.EnsureInit(off)
@@ -659,24 +782,83 @@ func (cc *Consumer) PollAndDispatchWithAck(ctx context.Context, handler AsyncMes
 
 		switch e := ev.(type) {
 		case *kafka.Message:
-			// 开始计时：记录消息拉取开始时间
-			startTime := time.Now()
-
-			// 递增消息计数器
-			count := cc.messageCount.Add(1)
-
 			part := e.TopicPartition.Partition
-			topic := *e.TopicPartition.Topic
+			topic := ""
+			if e.TopicPartition.Topic != nil {
+				topic = *e.TopicPartition.Topic
+			} else {
+				qlog.GetInstance().Sugar.Warnf("Message with nil topic, partition=%d offset=%d", part, int64(e.TopicPartition.Offset))
+			}
 			off := int64(e.TopicPartition.Offset)
 
 			key := TopicPartitionKey{Topic: topic, Partition: part}
+
+			// 埋点：每个分区只打印一次 FIRST-POLL
+			cc.firstPollLogOnce(key, off)
 
 			cc.gatesMu.RLock()
 			gate := cc.gates[key]
 			cc.gatesMu.RUnlock()
 			if gate == nil {
-				qlog.GetInstance().Sugar.Warnf("未找到 %s:%d 对应的提交闸门", topic, part)
-				continue
+				// 等待 Assigned 回调把 gate 放入（通常几十毫秒内完成）
+				const (
+					maxWaitIters = 100
+					waitStep     = 10 * time.Millisecond
+				)
+				waited := 0
+				for i := 0; i < maxWaitIters; i++ {
+					time.Sleep(waitStep)
+					waited++
+					cc.gatesMu.RLock()
+					gate = cc.gates[key]
+					cc.gatesMu.RUnlock()
+					if gate != nil {
+						break
+					}
+				}
+				if gate == nil {
+					// —— 兜底：用“与 Assigned 相同”的规则计算 start —— //
+					start := int64(-1)
+					tp := kafka.TopicPartition{Topic: &topic, Partition: part}
+
+					if committed, err := cc.c.Committed([]kafka.TopicPartition{tp}, 5000); err == nil && len(committed) == 1 {
+						co := committed[0].Offset
+						if co >= 0 {
+							start = int64(co) // Committed = 下一条要读
+						}
+					}
+					if start < 0 {
+						if low, _, err := cc.c.QueryWatermarkOffsets(topic, part, 5000); err == nil {
+							start = low
+						} else {
+							if low2, _, err2 := cc.c.GetWatermarkOffsets(topic, part); err2 == nil && low2 >= 0 {
+								start = low2
+							} else {
+								// 实在拿不到，用当前 off 兜底，但要打强告警
+								start = off
+								qlog.GetInstance().Sugar.Errorf(
+									"[GATE] resolve start failed, fallback to off=%d for %s:%d (waited=%d*%s): queryErr=%v getErr=%v",
+									off, topic, part, waited, waitStep, err, err2,
+								)
+							}
+						}
+					}
+
+					qlog.GetInstance().Sugar.Warnf(
+						"[GATE] Lazy-create commit gate for %s:%d start=%d (msg.off=%d, waited=%d*%s)",
+						topic, part, start, off, waited, waitStep,
+					)
+
+					cc.gatesMu.Lock()
+					if g2 := cc.gates[key]; g2 == nil {
+						gate = NewPartitionCommitGate(topic, part, start)
+						cc.gates[key] = gate
+						ReportGateBacklog(topic, part, 0)
+					} else {
+						gate = g2
+					}
+					cc.gatesMu.Unlock()
+				}
 			}
 
 			gate.EnsureInit(off)
@@ -697,17 +879,66 @@ func (cc *Consumer) PollAndDispatchWithAck(ctx context.Context, handler AsyncMes
 
 			go handler(e, ack)
 
-			// 结束计时：记录消息拉取总耗时及计数
-			elapsed := time.Since(startTime)
-			qlog.GetInstance().Sugar.Debugf("消息拉取耗时: count=%d, topic=%s, partition=%d, offset=%d, elapsed=%v",
-				count, topic, part, off, elapsed)
-
 		case kafka.Error:
 			qlog.GetInstance().Sugar.Warnf("Kafka 错误事件: %v", e)
 		default:
 			// 忽略其余事件
 		}
 	}
+}
+
+// 仅在每个 <topic,partition> 的“第一次消息”时打印 FIRST-POLL，并与 ASSIGN 的 start 对比。
+// 若 first_off < start，会打 WARN。
+func (cc *Consumer) firstPollLogOnce(key TopicPartitionKey, firstOff int64) {
+	cc.firstPollMu.Lock()
+	if cc.firstPollLogged == nil {
+		cc.firstPollLogged = make(map[TopicPartitionKey]bool, 64)
+	}
+	if cc.firstPollLogged[key] {
+		cc.firstPollMu.Unlock()
+		return
+	}
+	cc.firstPollLogged[key] = true
+	cc.firstPollMu.Unlock()
+
+	// 读取 ASSIGN 时记录的 start
+	cc.gatesMu.RLock()
+	start, ok := cc.assignStart[key]
+	cc.gatesMu.RUnlock()
+
+	if ok {
+		if firstOff < start {
+			qlog.GetInstance().Sugar.Warnf("[FIRST-POLL] %s:%d first_off=%d < start=%d (unexpected)",
+				key.Topic, key.Partition, firstOff, start)
+		} else {
+			qlog.GetInstance().Sugar.Infof("[FIRST-POLL] %s:%d first_off=%d (start=%d)",
+				key.Topic, key.Partition, firstOff, start)
+		}
+	} else {
+		qlog.GetInstance().Sugar.Infof("[FIRST-POLL] %s:%d first_off=%d (start=unknown)",
+			key.Topic, key.Partition, firstOff)
+	}
+}
+
+// 撤销/丢失时清理 FIRST-POLL 标记（便于下一次分配重新记录）
+func (cc *Consumer) clearFirstPollMark(key TopicPartitionKey) {
+	cc.firstPollMu.Lock()
+	if cc.firstPollLogged != nil {
+		delete(cc.firstPollLogged, key)
+	}
+	cc.firstPollMu.Unlock()
+}
+
+func (cc *Consumer) Committed(tps []kafka.TopicPartition, timeoutMs int) ([]kafka.TopicPartition, error) {
+	return cc.c.Committed(tps, timeoutMs)
+}
+
+func (cc *Consumer) QueryWatermarkOffsets(topic string, partition int32, timeoutMs int) (int64, int64, error) {
+	return cc.c.QueryWatermarkOffsets(topic, partition, timeoutMs)
+}
+
+func (cc *Consumer) GetWatermarkOffsets(topic string, partition int32) (int64, int64, error) {
+	return cc.c.GetWatermarkOffsets(topic, partition)
 }
 
 // Close 停止批量提交管理器并关闭底层 consumer。

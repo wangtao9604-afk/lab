@@ -30,7 +30,7 @@ https://ai.ipangsell.com/product/mall/query?area=%E9%9D%99%E5%AE%89&apikey=xp612
 
 
 ==========================================================
-POST API
+POST API Ver. 2
 ==========================================================
 搜索接口
 post https://ai.ipangsell.com/product/mall/query
@@ -42,6 +42,8 @@ amount：总价（万），单个值：1000，或者范围值：800,1000，范�
 size：面积（㎡），单个值：100，或者范围值：80,100，范围用英文逗号连接
 count：房间数，单个值：3，多个值：3,4,5，用英文逗号连接
 qas: 用户的问答列表，json字符串，q代表AI的问题，a代表用户的回答，可以有多个，例如：'[{"q": "请问您有什么问题？", "a": "1000万在哪里买房子比较好"}, {"q": "面积有要求吗？", "a": "100平左右"}]'
+location: 经纬度坐标，格式为“经度,纬度”，支持多个坐标以“|”分隔，如：121.394414,31.231732|121.384009,31.253307；没有则传空字符串
+radius: 坐标区域半径，单位米，例如：1000；没有则传空字符串
 apikey: xp6121770875700571
 nonce: 32位随机字符串
 timestamp：时间戳，秒
@@ -49,11 +51,11 @@ signature：签名值
 
 签名计算过程
 1.所有参数和对应的值用=拼接，然后按照参数字母顺序从小到大排列，用&拼接
-amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&qas=xxx&size=xxx&timestamp=xxx
+amount=xxx&apikey=xxx&area=xxx&count=xxx&location=xxx&nonce=xxx&plate=xxx&qas=xxx&radius=xxx&size=xxx&timestamp=xxx
 2.第1步得到的字符串后面拼接&和app_secret值
-amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&qas=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx
+amount=xxx&apikey=xxx&area=xxx&count=xxx&location=xxx&nonce=xxx&plate=xxx&qas=xxx&radius=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx
 3.对第2步得到的字符串进行md5计算，结果即为signature的值
-signature=md5(amount=xxx&apikey=xxx&area=xxx&count=xxx&&nonce=xxx&plate=xxx&qas=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx)"				
+signature=md5(amount=xxx&apikey=xxx&area=xxx&count=xxx&location=xxx&nonce=xxx&plate=xxx&qas=xxx&radius=xxx&size=xxx&timestamp=xxx&xxxxxxxxxxxx)"				
 测试：
 查询总价1000万附近、面积80-160㎡的3房楼盘
 post https://ai.ipangsell.com/product/mall/query

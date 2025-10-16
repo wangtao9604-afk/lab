@@ -22,6 +22,7 @@ const (
 	extractKeywordsToolName        = "extract_keywords"
 	confirmLocationToolName        = "confirm_location_change"
 	classifyPurchaseIntentToolName = "classify_purchase_intent"
+	microLocationToolName          = "extract_micro_location"
 	endConversationMessage         = "为您生成详细的房源推荐报告"
 )
 
@@ -958,6 +959,75 @@ func CreateExtractKeywordsTool() Tool {
 	}
 }
 
+// CreateMicroLocationTool 创建微地标/距离表达捕获工具
+func CreateMicroLocationTool() Tool {
+	travelItemSchema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"anchor_name": map[string]interface{}{
+				"type":        "string",
+				"description": "锚点名称，例如‘七宝万科广场’或‘9号线七宝站’",
+			},
+			"anchor_type": map[string]interface{}{
+				"type":        "string",
+				"enum":        []string{"street_address", "metro_station", "bus_stop", "poi", "unknown"},
+				"description": "锚点类型，无法判断填 unknown",
+			},
+			"mode": map[string]interface{}{
+				"type":        "string",
+				"enum":        []string{"walk", "bike", "drive"},
+				"description": "出行方式：walk(步行)/bike(骑行)/drive(驾车)",
+			},
+			"min_minutes": map[string]interface{}{
+				"type":        "number",
+				"description": "最短时间（分钟）",
+			},
+			"max_minutes": map[string]interface{}{
+				"type":        "number",
+				"description": "最长时间（分钟）",
+			},
+		},
+		"required": []string{"anchor_name", "mode", "min_minutes", "max_minutes"},
+	}
+
+	return Tool{
+		Type: "function",
+		Function: FunctionDefinition{
+			Name:        microLocationToolName,
+			Description: "识别用户提供的微地标（地址/地铁站/地标）以及‘离某地步行/骑行/驾车约Y分钟’等距离表达，用于补全位置锚点。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"micro_location": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"name": map[string]interface{}{
+								"type":        "string",
+								"description": "微地标名称，如‘七宝万科广场’或‘XX路XX号’",
+							},
+							"type": map[string]interface{}{
+								"type":        "string",
+								"enum":        []string{"street_address", "metro_station", "bus_stop", "poi", "unknown"},
+								"description": "锚点类型，缺省为 unknown",
+							},
+						},
+					},
+					"micro_location_opt_out": map[string]interface{}{
+						"type":        "boolean",
+						"description": "用户是否明确表示不限定微地标",
+					},
+					"travel_time_constraints": map[string]interface{}{
+						"type":        "array",
+						"items":       travelItemSchema,
+						"description": "距离表达数组，通常取第一项即可",
+					},
+				},
+				"required": []string{},
+			},
+		},
+	}
+}
+
 // CreateClassifyPurchaseIntentTool 创建购房意向分类工具
 // 模型需调用该工具并在arguments中返回 {"intent":"新房|二手房|All"}
 func CreateClassifyPurchaseIntentTool() Tool {
@@ -1163,6 +1233,7 @@ func (c *Client) RealEstateConsultWithFunctionCall(ctx context.Context, messages
 		CreateEndConversationTool(),        // 结束时调用
 		CreateConfirmLocationChangeTool(),  // 位置切换确认
 		CreateClassifyPurchaseIntentTool(), // 意向分类
+		CreateMicroLocationTool(),          // 微地标与距离表达
 	}
 
 	// 调用带工具的对话接口

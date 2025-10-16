@@ -38,12 +38,14 @@ type Client struct {
 
 // QueryParams 查询参数
 type QueryParams struct {
-	Area   string // 区域，如：普陀区、静安区等
-	Amount string // 总价（万），单个值：1000，或者范围值：800,1000
-	Count  string // 房间数，单个值：3，多个值：3,4,5
-	Plate  string // 板块，如：浦江,七宝
-	Size   string // 面积（㎡），单个值：100，或者范围值：80,100
-	Qas    string // 问答列表，JSON字符串，如：'[{"q": "请问您有什么问题？", "a": "1000万在哪里买房子比较好"}]'
+	Area     string // 区域，如：普陀区、静安区等
+	Amount   string // 总价（万），单个值：1000，或者范围值：800,1000
+	Count    string // 房间数，单个值：3，多个值：3,4,5
+	Plate    string // 板块，如：浦江,七宝
+	Location string // 经纬度坐标，格式：lng,lat|lng,lat
+	Radius   string // 坐标区域半径，单位米
+	Size     string // 面积（㎡），单个值：100，或者范围值：80,100
+	Qas      string // 问答列表，JSON字符串，如：'[{"q": "请问您有什么问题？", "a": "1000万在哪里买房子比较好"}]'
 }
 
 // HouseItem 房产列表项
@@ -76,13 +78,13 @@ type BaseQueryDetail struct {
 
 // PostQueryDetail POST查询详情（包含错误分析字段）
 type PostQueryDetail struct {
-    BaseQueryDetail                                                        // 继承基础字段
-    NewHouseError           string `json:"new_house_error"`           // 新房查询不出结果的原因
-    NewHouseExistParams     StrList `json:"new_house_exist_params"`    // 新房已查询出结果的参数字段（可能为数组或逗号分隔字符串）
-    NewHouseNoExistParams   StrList `json:"new_house_no_exist_params"` // 新房查询不出结果的字段（可能为数组或逗号分隔字符串）
-    SecHouseError           string `json:"sec_house_error"`           // 二手房查询不出结果的原因
-    SecHouseExistParams     StrList `json:"sec_house_exist_params"`    // 二手房已查询出结果的参数字段（可能为数组或逗号分隔字符串）
-    SecHouseNoExistParams   StrList `json:"sec_house_no_exist_params"` // 二手房查询不出结果的字段（可能为数组或逗号分隔字符串）
+	BaseQueryDetail               // 继承基础字段
+	NewHouseError         string  `json:"new_house_error"`           // 新房查询不出结果的原因
+	NewHouseExistParams   StrList `json:"new_house_exist_params"`    // 新房已查询出结果的参数字段（可能为数组或逗号分隔字符串）
+	NewHouseNoExistParams StrList `json:"new_house_no_exist_params"` // 新房查询不出结果的字段（可能为数组或逗号分隔字符串）
+	SecHouseError         string  `json:"sec_house_error"`           // 二手房查询不出结果的原因
+	SecHouseExistParams   StrList `json:"sec_house_exist_params"`    // 二手房已查询出结果的参数字段（可能为数组或逗号分隔字符串）
+	SecHouseNoExistParams StrList `json:"sec_house_no_exist_params"` // 二手房查询不出结果的字段（可能为数组或逗号分隔字符串）
 }
 
 // StrList 兼容字符串或字符串数组的JSON字段。
@@ -90,35 +92,35 @@ type PostQueryDetail struct {
 type StrList []string
 
 func (s *StrList) UnmarshalJSON(b []byte) error {
-    // 如果是数组，直接解
-    if len(b) > 0 && b[0] == '[' {
-        var arr []string
-        if err := json.Unmarshal(b, &arr); err != nil {
-            return err
-        }
-        *s = arr
-        return nil
-    }
-    // 否则按字符串处理
-    var str string
-    if err := json.Unmarshal(b, &str); err != nil {
-        return err
-    }
-    if str == "" {
-        *s = []string{}
-        return nil
-    }
-    // 逗号分隔，去掉两端空格
-    parts := strings.Split(str, ",")
-    out := make([]string, 0, len(parts))
-    for _, p := range parts {
-        p = strings.TrimSpace(p)
-        if p != "" {
-            out = append(out, p)
-        }
-    }
-    *s = out
-    return nil
+	// 如果是数组，直接解
+	if len(b) > 0 && b[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(b, &arr); err != nil {
+			return err
+		}
+		*s = arr
+		return nil
+	}
+	// 否则按字符串处理
+	var str string
+	if err := json.Unmarshal(b, &str); err != nil {
+		return err
+	}
+	if str == "" {
+		*s = []string{}
+		return nil
+	}
+	// 逗号分隔，去掉两端空格
+	parts := strings.Split(str, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	*s = out
+	return nil
 }
 
 // QueryDetail 为了向后兼容，保留原名称（GET接口使用）
@@ -192,6 +194,7 @@ func (c *Client) buildAndSignParams(params *QueryParams, isPost bool) map[string
 	reqParams["apikey"] = c.appID
 	reqParams["area"] = params.Area
 	reqParams["count"] = params.Count
+	reqParams["location"] = params.Location
 	reqParams["nonce"] = generateNonce()
 	reqParams["plate"] = params.Plate
 
@@ -202,6 +205,7 @@ func (c *Client) buildAndSignParams(params *QueryParams, isPost bool) map[string
 		reqParams["qas"] = params.Qas // GET请求只在非空时包含
 	}
 
+	reqParams["radius"] = params.Radius
 	reqParams["size"] = params.Size
 	reqParams["timestamp"] = strconv.FormatInt(time.Now().Unix(), 10)
 
@@ -461,7 +465,7 @@ func (c *Client) PostQuery(params *QueryParams) (*PostQueryResponse, error) {
 
 	// 发送POST请求
 	log.GetInstance().Sugar.Infof("Sending POST to Ipang API: %s", fullURL)
-	log.GetInstance().Sugar.Debugf("Form data: %s", formData)
+	log.GetInstance().Sugar.Debugf("Form data: %+v", formVals)
 
 	respBytes, err := postSession.Post(fullURL, []byte(formData), 0) // 使用0作为默认类型，因为我们手动设置了Content-Type
 	if err != nil {

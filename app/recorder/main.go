@@ -124,6 +124,9 @@ func main() {
 			OnRevoked: func(topic string, partition int32) {
 				logger.Infof("partition revoked: topic=%s partition=%d", topic, partition)
 			},
+			OnLost: func(topic string, partition int32) {
+				logger.Infof("partition revoked: topic=%s partition=%d", topic, partition)
+			},
 		}),
 	)
 	if err != nil {

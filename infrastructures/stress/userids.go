@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	userIDCount    = 1000
-	userIDFilePath = "/etc/qywx/userids.json" // UserID 预生成文件路径（固定绝对路径）
+	userIDCount    = 5000
+	userIDFilePath = "/etc/qywx/userids_5000.json" // UserID 预生成文件路径（固定绝对路径）
 )
 
 var (

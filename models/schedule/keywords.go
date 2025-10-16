@@ -50,10 +50,24 @@ const (
 
 // LocationInfo 地段信息
 type LocationInfo struct {
-	Province string `json:"province,omitempty"` // 省份
-	District string `json:"district,omitempty"` // 区域
-	Plate    string `json:"plate,omitempty"`    // 板块
-	Landmark string `json:"landmark,omitempty"` // 地标
+	Province string      `json:"province,omitempty"` // 省份
+	District string      `json:"district,omitempty"` // 区域
+	Plate    string      `json:"plate,omitempty"`    // 板块
+	Landmark string      `json:"landmark,omitempty"` // 地标
+	Anchor   *AnchorInfo `json:"anchor,omitempty"`   // 锚点信息，包括坐标和半径
+}
+
+// AnchorInfo 微地标锚点信息
+type AnchorInfo struct {
+	Name               string  `json:"name,omitempty"`
+	Type               string  `json:"type,omitempty"`
+	Mode               string  `json:"mode,omitempty"`
+	Source             string  `json:"source,omitempty"`
+	Location           string  `json:"location,omitempty"`
+	RadiusMinMeters    float64 `json:"radius_min_m,omitempty"`
+	RadiusMaxMeters    float64 `json:"radius_max_m,omitempty"`
+	RadiusMeters       float64 `json:"radius_m,omitempty"`
+	RadiusSearchMeters float64 `json:"radius_search_m,omitempty"`
 }
 
 // RoomLayoutInfo 户型信息
@@ -1184,6 +1198,11 @@ func (s *KeywordExtractorService) parseLocationData(data interface{}) []Location
 		if landmark, ok := v["landmark"].(string); ok {
 			location.Landmark = landmark
 		}
+		if anchorData, ok := v["anchor"]; ok {
+			if anchor := s.parseAnchorData(anchorData); anchor != nil {
+				location.Anchor = anchor
+			}
+		}
 		return []LocationInfo{location}
 	case []interface{}:
 		// location数组，取最后一个有效的（统一"最新为准"策略）
@@ -1196,6 +1215,121 @@ func (s *KeywordExtractorService) parseLocationData(data interface{}) []Location
 		}
 	}
 	return []LocationInfo{}
+}
+
+func (s *KeywordExtractorService) parseAnchorData(data interface{}) *AnchorInfo {
+	m, ok := data.(map[string]interface{})
+	if !ok || len(m) == 0 {
+		return nil
+	}
+
+	anchor := &AnchorInfo{}
+	hasValue := false
+
+	if name, ok := m["name"].(string); ok {
+		anchor.Name = strings.TrimSpace(name)
+		if anchor.Name != "" {
+			hasValue = true
+		}
+	}
+	if typ, ok := m["type"].(string); ok {
+		anchor.Type = strings.TrimSpace(typ)
+		if anchor.Type != "" {
+			hasValue = true
+		}
+	}
+	if mode, ok := m["mode"].(string); ok {
+		anchor.Mode = strings.TrimSpace(mode)
+		if anchor.Mode != "" {
+			hasValue = true
+		}
+	}
+	if source, ok := m["source"].(string); ok {
+		anchor.Source = strings.TrimSpace(source)
+		if anchor.Source != "" {
+			hasValue = true
+		}
+	}
+
+	// 坐标
+	if loc, ok := m["location"].(string); ok {
+		anchor.Location = strings.TrimSpace(loc)
+		if anchor.Location != "" {
+			hasValue = true
+		}
+	}
+	if geoLoc, ok := m["geocode_location"].(string); ok && anchor.Location == "" {
+		anchor.Location = strings.TrimSpace(geoLoc)
+		if anchor.Location != "" {
+			hasValue = true
+		}
+	}
+	if anchor.Location == "" {
+		if first := firstLocationFromRaw(m["locations"]); first != "" {
+			anchor.Location = first
+			hasValue = true
+		}
+	}
+
+	// 半径信息
+	if val := toFloat64(m["radius_min_m"]); val > 0 {
+		anchor.RadiusMinMeters = val
+		hasValue = true
+	}
+	if val := toFloat64(m["radius_max_m"]); val > 0 {
+		anchor.RadiusMaxMeters = val
+		hasValue = true
+	}
+	if val := toFloat64(m["radius_m"]); val > 0 {
+		anchor.RadiusMeters = val
+		hasValue = true
+	}
+	if val := toFloat64(m["radius_search_m"]); val > 0 {
+		anchor.RadiusSearchMeters = val
+		hasValue = true
+	}
+
+	if !hasValue {
+		return nil
+	}
+	return anchor
+}
+
+func firstLocationFromRaw(value interface{}) string {
+	switch v := value.(type) {
+	case []string:
+		for _, item := range v {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				return trimmed
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return ""
+		}
+		for _, sep := range []string{"|", ","} {
+			if strings.Contains(trimmed, sep) {
+				parts := strings.Split(trimmed, sep)
+				for _, part := range parts {
+					if candidate := strings.TrimSpace(part); candidate != "" {
+						return candidate
+					}
+				}
+				return ""
+			}
+		}
+		return trimmed
+	}
+	return ""
 }
 
 // parsePriceData 解析价格数据（简单实用版本）
@@ -1288,6 +1422,37 @@ func (s *KeywordExtractorService) parseAreaData(data interface{}) []AreaInfo {
 		}
 	}
 	return []AreaInfo{}
+}
+
+func toFloat64(value interface{}) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case uint64:
+		return float64(v)
+	case int32:
+		return float64(v)
+	case uint32:
+		return float64(v)
+	case json.Number:
+		f, _ := v.Float64()
+		return f
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return 0
+		}
+		if f, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return f
+		}
+	}
+	return 0
 }
 
 // parseRoomLayoutData 解析户型数据（简单实用版本）

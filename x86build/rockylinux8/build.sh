@@ -13,4 +13,4 @@ fi
 docker run --rm --platform=linux/amd64 \
   -v "$ROOT_DIR":/workspace \
   -w /workspace \
-  "$IMAGE_NAME" bash -c "make clean && make build_amd64_static"
+  "$IMAGE_NAME" bash -c "make clean && make debug"

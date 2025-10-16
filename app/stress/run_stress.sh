@@ -12,7 +12,8 @@
 set -euo pipefail
 
 # Configuration
-PRODUCER_URL="${PRODUCER_URL:-http://localhost:11112/stress}"
+PRODUCER_URL="${PRODUCER_URL:-http://192.168.57.70:11113/stress}"
+#PRODUCER_URL="${PRODUCER_URL:-http://127.0.0.1:11112/stress}"
 TOTAL_REQUESTS="${1:-10000}"
 CONCURRENT="${2:-10}"
 

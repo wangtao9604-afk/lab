@@ -257,11 +257,6 @@ func (s *KFService) HandleCallback(ctx context.Context, event *kefu.KFCallbackMe
 		ReportMessage(appID, callbackMsgType(event), "callback")
 	}
 
-	// 检查是否处于压测模式
-	if config.GetInstance().Stress {
-		return s.handleWithStress(ctx, event, epoch)
-	}
-
 	if epoch > 0 && s.cursorStore != nil {
 		return s.handleWithCursorStore(ctx, event, epoch)
 	}

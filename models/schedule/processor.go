@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -232,19 +233,8 @@ func (p *Processor) run() {
 			}
 
 			// 检查是否处于压测模式
-			cfg := config.GetInstance()
-			if cfg.Stress {
-				if err := p.processStressMessage(in); err != nil {
-					log.GetInstance().Sugar.Error("Process stress message failed for user ", p.userID, ": ", err)
-				}
-			} else {
-				if err := p.processMessage(msg); err != nil {
-					log.GetInstance().Sugar.Error("Process message failed for user ", p.userID, ": ", err)
-				}
-			}
-
-			if in.Ack != nil {
-				in.Ack(true)
+			if err := p.processMessage(msg); err != nil {
+				log.GetInstance().Sugar.Error("Process message failed for user ", p.userID, ": ", err)
 			}
 		}
 	}
@@ -370,6 +360,10 @@ func (p *Processor) handleTextMessage(ctx context.Context, deadline time.Time, m
 		log.GetInstance().Sugar.Warn("Keywords channel full, skipping extraction")
 	}
 
+	// 第一时间尝试本地解析微地标/距离表达（幂等门禁）
+	p.maybeParseAndAttachAnchorFromText(msg.Text.Content)
+	p.maybeHandleAnchorOptOutFromUser(msg.Text.Content)
+
 	// 1.6 若存在pending，尝试从用户文本中直接解析“是否切换/是否重置”的意图（肯定/否定短语门禁）
 	p.maybeHandlePendingDecisionFromUser(msg.Text.Content)
 
@@ -424,13 +418,20 @@ func (p *Processor) handleTextMessage(ctx context.Context, deadline time.Time, m
 
 	// 在处理文本前：若AI判定结束且存在未拦截的pending，优先发起位置确认（不下发本次结束文本）
 	if aiResponse.IsConversationEnd {
+		intercept := false
 		p.keywordsMu.Lock()
 		hasPendingFirst := (p.pendingLoc != nil && !p.pendingEndIntercepted)
-		p.keywordsMu.Unlock()
 		if hasPendingFirst {
-			if p.handleEndAttempt(ctx, msg, aiResponse.EndCallData, aiResponse.IsConversationEnd) {
-				return nil
+			intercept = true
+		}
+		p.keywordsMu.Unlock()
+		if !intercept {
+			if need, _ := p.needMicroLocPrompt(); need {
+				intercept = true
 			}
+		}
+		if intercept && p.handleEndAttempt(ctx, msg, aiResponse.EndCallData, true) {
+			return nil
 		}
 	}
 
@@ -481,53 +482,9 @@ func (p *Processor) handleTextMessage(ctx context.Context, deadline time.Time, m
 
 	// 7. 检查对话是否结束（统一走拦截/收尾逻辑）
 	if aiResponse.IsConversationEnd {
-		// 若存在待确认的位置切换，拦截结束，但仅拦截一次
-		p.keywordsMu.Lock()
-		hasPending := (p.pendingLoc != nil)
-		firstIntercept := false
-		var pd *PendingLoc
-		if hasPending {
-			pd = p.pendingLoc
-			if !p.pendingEndIntercepted {
-				// 第一次拦截：标记后发确认语
-				p.pendingEndIntercepted = true
-				firstIntercept = true
-			} else {
-				// 第二次仍要结束：视为不切换，丢弃pending（合并暂存）
-				log.GetInstance().Sugar.Infof("Second end while pending; assume no switch and discard pending [%s/%s]",
-					p.pendingLoc.District, p.pendingLoc.Plate)
-				p.discardPending()
-				hasPending = false
-			}
-		}
-		p.keywordsMu.Unlock()
-
-		if hasPending && firstIntercept {
-			log.GetInstance().Sugar.Infof("Intercepted end: pending location exists [%s/%s]; asking confirmation before report",
-				pd.District, pd.Plate)
-			confirmText := p.buildPendingConfirmReply()
-			if err := p.addAssistantMessage(confirmText, false); err != nil {
-				log.GetInstance().Sugar.Error("Failed to add pending confirm to history: ", err)
-				return fmt.Errorf("failed to add pending confirm: %w", err)
-			}
-			if err := p.sendAIReply(ctx, msg, confirmText); err != nil {
-				return fmt.Errorf("failed to send pending confirm reply: %w", err)
-			}
+		if p.handleEndAttempt(ctx, msg, aiResponse.EndCallData, true) {
 			return nil
 		}
-
-		log.GetInstance().Sugar.Info("Conversation ended for user ", msg.ExternalUserID)
-		p.logConversationEnd(aiResponse.EndCallData)
-
-		// 在对话结束时发送任务到furtherProcess channel
-		p.sendToFurtherProcess()
-
-		// 不清理历史，因为需要保留历史以便后续的咨询
-		// if aiResponse.IsEndFuncCalled {
-		// p.clearConversationHistory()
-		// log.GetInstance().Sugar.Info("Cleared conversation history for user ", msg.ExternalUserID, " after function call completion")
-		// }
-
 	}
 
 	return nil
@@ -1085,6 +1042,7 @@ func (p *Processor) sendToFurtherProcess() {
 	p.keywordsMu.RUnlock()
 	keywordsCopy := p.buildEffectiveKeywordsSnapshot()
 	log.GetInstance().Sugar.Infof("Built effective keywords snapshot (pending=%v), dimensions=%d", hasPending, len(keywordsCopy))
+	anchorCopy := extractAnchorFromSnapshot(keywordsCopy)
 
 	// 创建任务
 	task := &FurtherProcessTask{
@@ -1093,6 +1051,7 @@ func (p *Processor) sendToFurtherProcess() {
 		ConversationHistory: historyCopy,
 		RawConverHistory:    rawHistoryCopy,
 		Keywords:            keywordsCopy, // 传递合并后的有效关键词
+		Anchor:              anchorCopy,
 	}
 
 	// 发送到channel（非阻塞）
@@ -1165,11 +1124,14 @@ func (p *Processor) extractAndMergeKeywords(message string) {
 
 	// 合并到map（加锁）
 	p.keywordsMu.Lock()
-	defer p.keywordsMu.Unlock()
-
 	p.deepMergeKeywordsToMap(result.Fields)
+	p.keywordsMu.Unlock()
 
 	log.GetInstance().Sugar.Debugf("Extracted keywords for user %s: %+v", p.userID, result.Fields)
+
+	// 合并后再次尝试本地解析锚点/opt-out，确保同步路径也具备能力
+	p.maybeParseAndAttachAnchorFromText(message)
+	p.maybeHandleAnchorOptOutFromUser(message)
 }
 
 // deepMergeKeywordsToMap 深度合并关键词到map
@@ -1283,6 +1245,16 @@ func (p *Processor) mergeFieldsToTarget(target map[string]interface{}, fields ma
 			target[key] = p.mergeRoomLayoutData(existing, value)
 		case "decoration", "property_type", "orientation", "interest_points", "commercial":
 			target[key] = p.mergeStringArrayData(existing, value)
+		case "micro_location_opt_out":
+			if b, ok := value.(bool); ok && b {
+				target[key] = true
+			} else if !exists {
+				target[key] = value
+			}
+		case "anchor":
+			if m, ok := value.(map[string]interface{}); ok && m != nil {
+				p.mergeAnchorIntoRecord(target, m)
+			}
 		default:
 			if !exists {
 				target[key] = value
@@ -1323,6 +1295,11 @@ func (p *Processor) mergeLocationIntoRecord(record map[string]interface{}, provi
 	if record == nil {
 		return
 	}
+	district = strings.TrimSpace(district)
+	plate = strings.TrimSpace(plate)
+	if district != "" && plate != "" && strings.EqualFold(district, plate) {
+		plate = ""
+	}
 	lm := map[string]interface{}{}
 	if v, ok := record["location"].(map[string]interface{}); ok {
 		// 复制以避免共享引用副作用
@@ -1333,16 +1310,185 @@ func (p *Processor) mergeLocationIntoRecord(record map[string]interface{}, provi
 	if strings.TrimSpace(province) != "" {
 		lm["province"] = "上海" // 存储层统一用“上海”
 	}
-	if strings.TrimSpace(district) != "" {
+	if district != "" {
 		lm["district"] = district
 	}
-	if strings.TrimSpace(plate) != "" {
+	if plate != "" {
 		lm["plate"] = plate
 	}
 	if strings.TrimSpace(landmark) != "" {
 		lm["landmark"] = landmark
 	}
 	record["location"] = lm
+}
+
+// mergeAnchorIntoRecord 将锚点信息写入 location.anchor。
+func (p *Processor) mergeAnchorIntoRecord(record map[string]interface{}, anchor map[string]interface{}) {
+	if record == nil || anchor == nil || len(anchor) == 0 {
+		return
+	}
+	lm := map[string]interface{}{}
+	if v, ok := record["location"].(map[string]interface{}); ok && v != nil {
+		for k, val := range v {
+			lm[k] = val
+		}
+	}
+	lm["anchor"] = anchor
+	record["location"] = lm
+}
+
+func (p *Processor) getTravelSpeeds() ikeywords.TravelSpeeds {
+	cfg := config.GetInstance()
+	return ikeywords.TravelSpeeds{
+		WalkMpm:  cfg.KeywordsConfig.TravelSpeedWalkMpm,
+		BikeMpm:  cfg.KeywordsConfig.TravelSpeedBikeMpm,
+		DriveMpm: cfg.KeywordsConfig.TravelSpeedDriveMpm,
+	}
+}
+
+func (p *Processor) maybeParseAndAttachAnchorFromText(text string) {
+	txt := strings.TrimSpace(text)
+	if txt == "" || p.keywordExtractor == nil || p.keywordExtractor.extractor == nil {
+		return
+	}
+
+	p.keywordsMu.RLock()
+	isPending := p.pendingLoc != nil
+	var plateReady bool
+	var hasAnchor bool
+	optOut := false
+
+	if isPending {
+		if p.pendingLoc != nil && strings.TrimSpace(p.pendingLoc.Plate) != "" {
+			plateReady = true
+		}
+		if p.stagedNonLocation != nil {
+			if _, ok := p.stagedNonLocation["anchor"]; ok {
+				hasAnchor = true
+			}
+			if b, ok := p.stagedNonLocation["micro_location_opt_out"].(bool); ok && b {
+				optOut = true
+			}
+		}
+		if !optOut {
+			if b, ok := p.currentKeywords["micro_location_opt_out"].(bool); ok && b {
+				optOut = true
+			}
+		}
+	} else {
+		if p.currentKeywords != nil {
+			if lm, ok := p.currentKeywords["location"].(map[string]interface{}); ok && lm != nil {
+				if plate, ok := lm["plate"].(string); ok && strings.TrimSpace(plate) != "" {
+					plateReady = true
+				}
+				if _, ok := lm["anchor"]; ok {
+					hasAnchor = true
+				}
+			}
+			if b, ok := p.currentKeywords["micro_location_opt_out"].(bool); ok && b {
+				optOut = true
+			}
+		}
+	}
+	p.keywordsMu.RUnlock()
+
+	if !plateReady || hasAnchor || optOut {
+		return
+	}
+
+	constraints := p.keywordExtractor.extractor.ParseTravelConstraints(txt, p.getTravelSpeeds())
+	if len(constraints) == 0 {
+		return
+	}
+	tc := constraints[0]
+	if strings.TrimSpace(tc.AnchorRaw) == "" {
+		return
+	}
+	anchor := map[string]interface{}{
+		"name":         tc.AnchorRaw,
+		"type":         tc.AnchorType,
+		"mode":         string(tc.Mode),
+		"min_minutes":  tc.Duration.MinMinutes,
+		"max_minutes":  tc.Duration.MaxMinutes,
+		"radius_min_m": tc.RadiusMinMeters,
+		"radius_max_m": tc.RadiusMaxMeters,
+		"source":       "local",
+	}
+
+	p.keywordsMu.Lock()
+	defer p.keywordsMu.Unlock()
+
+	if p.pendingLoc != nil {
+		if strings.TrimSpace(p.pendingLoc.Plate) == "" {
+			return
+		}
+		if p.stagedNonLocation != nil {
+			if _, ok := p.stagedNonLocation["micro_location_opt_out"].(bool); ok {
+				if b, _ := p.stagedNonLocation["micro_location_opt_out"].(bool); b {
+					return
+				}
+			}
+			if _, ok := p.stagedNonLocation["anchor"]; ok {
+				return
+			}
+		} else {
+			p.stagedNonLocation = make(map[string]interface{})
+		}
+		p.stagedNonLocation["anchor"] = anchor
+		log.GetInstance().Sugar.Infof("Staged anchor captured (pending): %+v", anchor)
+		return
+	}
+
+	if p.currentKeywords == nil {
+		p.currentKeywords = make(map[string]interface{})
+	}
+	plate := ""
+	if b, ok := p.currentKeywords["micro_location_opt_out"].(bool); ok && b {
+		return
+	}
+	if lm, ok := p.currentKeywords["location"].(map[string]interface{}); ok && lm != nil {
+		if _, ok := lm["anchor"]; ok {
+			return
+		}
+		if ps, ok := lm["plate"].(string); ok {
+			plate = strings.TrimSpace(ps)
+		}
+	}
+	if plate == "" {
+		return
+	}
+	p.mergeAnchorIntoRecord(p.currentKeywords, anchor)
+	log.GetInstance().Sugar.Infof("Anchor merged into current record: %+v", anchor)
+}
+
+func (p *Processor) maybeHandleAnchorOptOutFromUser(text string) {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return
+	}
+	hit := strings.Contains(t, "不限定") || strings.Contains(t, "不限") ||
+		strings.Contains(t, "不用具体地标") || strings.Contains(t, "不指定地标") ||
+		strings.Contains(t, "只看整个") || strings.Contains(t, "看整个") ||
+		strings.Contains(t, "整个板块") || strings.Contains(t, "全区") || strings.Contains(t, "全板块")
+	if !hit {
+		return
+	}
+
+	p.keywordsMu.Lock()
+	defer p.keywordsMu.Unlock()
+
+	if p.pendingLoc != nil {
+		if p.stagedNonLocation == nil {
+			p.stagedNonLocation = make(map[string]interface{})
+		}
+		p.stagedNonLocation["micro_location_opt_out"] = true
+	} else {
+		if p.currentKeywords == nil {
+			p.currentKeywords = make(map[string]interface{})
+		}
+		p.currentKeywords["micro_location_opt_out"] = true
+	}
+	log.GetInstance().Sugar.Info("micro_location_opt_out set to true by user text")
 }
 
 // beginPending 进入待确认阶段
@@ -1416,6 +1562,7 @@ func (p *Processor) commitPending(confirmDistrict, confirmPlate string) {
 	p.stagedNonLocation = make(map[string]interface{})
 	p.pendingResetNonLocation = false
 	p.pendingEndIntercepted = false
+	p.microLocAskIntercepted = false
 
 	log.GetInstance().Sugar.Infof("Location change committed: finalLoc -> [%s], plate -> [%s]",
 		p.finalLoc.District, p.getCurrentPlate())
@@ -1436,6 +1583,7 @@ func (p *Processor) discardPending() {
 	p.stagedNonLocation = make(map[string]interface{})
 	p.pendingResetNonLocation = false
 	p.pendingEndIntercepted = false
+	p.microLocAskIntercepted = false
 }
 
 // applyPlateChangeClearIfNeeded 如果plate变化，根据reset策略决定是否清空非location维度
@@ -1545,6 +1693,188 @@ func (p *Processor) handleClassifyPurchaseIntentToolCalls(calls []minimax.ToolCa
 	}
 }
 
+func (p *Processor) handleMicroLocationToolCalls(calls []minimax.ToolCall) {
+	if len(calls) == 0 {
+		return
+	}
+	for _, tc := range calls {
+		if tc.Function.Name != "extract_micro_location" {
+			continue
+		}
+		if p.handleSingleMicroLocationCall(tc) {
+			return
+		}
+	}
+}
+
+func (p *Processor) handleSingleMicroLocationCall(tc minimax.ToolCall) bool {
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		log.GetInstance().Sugar.Warnf("Failed to parse extract_micro_location args: %v", err)
+		return false
+	}
+
+	if optRaw, ok := args["micro_location_opt_out"].(bool); ok && optRaw {
+		p.keywordsMu.Lock()
+		if p.pendingLoc != nil {
+			if p.stagedNonLocation == nil {
+				p.stagedNonLocation = make(map[string]interface{})
+			}
+			p.stagedNonLocation["micro_location_opt_out"] = true
+		} else {
+			if p.currentKeywords == nil {
+				p.currentKeywords = make(map[string]interface{})
+			}
+			p.currentKeywords["micro_location_opt_out"] = true
+		}
+		p.keywordsMu.Unlock()
+		log.GetInstance().Sugar.Info("Handled extract_micro_location: micro_location_opt_out=true")
+		return true
+	}
+
+	anchorName := ""
+	anchorType := ""
+	modeStr := ""
+	minMinutes := 0.0
+	maxMinutes := 0.0
+	haveDuration := false
+
+	if mlRaw, ok := args["micro_location"]; ok {
+		if ml, ok := mlRaw.(map[string]interface{}); ok {
+			if name := strings.TrimSpace(fmt.Sprint(ml["name"])); name != "" {
+				anchorName = name
+			}
+			if typ := strings.TrimSpace(fmt.Sprint(ml["type"])); typ != "" {
+				anchorType = typ
+			}
+		}
+	}
+
+	if arr, ok := args["travel_time_constraints"].([]interface{}); ok && len(arr) > 0 {
+		if item, ok := arr[0].(map[string]interface{}); ok {
+			if name := strings.TrimSpace(fmt.Sprint(item["anchor_name"])); name != "" {
+				anchorName = name
+			}
+			if typ := strings.TrimSpace(fmt.Sprint(item["anchor_type"])); typ != "" {
+				anchorType = typ
+			}
+			modeStr = strings.ToLower(strings.TrimSpace(fmt.Sprint(item["mode"])))
+			minMinutes, maxMinutes, haveDuration = normalizeDuration(
+				toFloat(item["min_minutes"]),
+				toFloat(item["max_minutes"]),
+			)
+		}
+	}
+
+	if strings.TrimSpace(anchorName) == "" {
+		return false
+	}
+	if anchorType == "" {
+		anchorType = "unknown"
+	}
+	speeds := p.getTravelSpeeds()
+	speedMap := map[string]float64{"walk": speeds.WalkMpm, "bike": speeds.BikeMpm, "drive": speeds.DriveMpm}
+	mode := modeStr
+	if mode != "walk" && mode != "bike" && mode != "drive" {
+		mode = "walk"
+	}
+	sp := speedMap[mode]
+	anchor := map[string]interface{}{
+		"name":   anchorName,
+		"type":   anchorType,
+		"mode":   mode,
+		"source": "llm",
+	}
+	if haveDuration {
+		anchor["min_minutes"] = minMinutes
+		anchor["max_minutes"] = maxMinutes
+		if sp > 0 {
+			anchor["radius_min_m"] = minMinutes * sp
+			anchor["radius_max_m"] = maxMinutes * sp
+		}
+	}
+
+	p.keywordsMu.Lock()
+	defer p.keywordsMu.Unlock()
+
+	if p.pendingLoc != nil {
+		if strings.TrimSpace(p.pendingLoc.Plate) == "" {
+			return false
+		}
+		if p.stagedNonLocation == nil {
+			p.stagedNonLocation = make(map[string]interface{})
+		}
+		if b, ok := p.stagedNonLocation["micro_location_opt_out"].(bool); ok && b {
+			return true
+		}
+		if _, ok := p.stagedNonLocation["anchor"]; ok {
+			return true
+		}
+		p.stagedNonLocation["anchor"] = anchor
+		log.GetInstance().Sugar.Infof("Anchor captured from tool (pending): %+v", anchor)
+		return true
+	}
+
+	if p.currentKeywords == nil {
+		p.currentKeywords = make(map[string]interface{})
+	}
+	if b, ok := p.currentKeywords["micro_location_opt_out"].(bool); ok && b {
+		return true
+	}
+	plate := ""
+	if lm, ok := p.currentKeywords["location"].(map[string]interface{}); ok && lm != nil {
+		if _, ok := lm["anchor"]; ok {
+			return true
+		}
+		if ps, ok := lm["plate"].(string); ok {
+			plate = strings.TrimSpace(ps)
+		}
+	}
+	if plate == "" {
+		return false
+	}
+	p.mergeAnchorIntoRecord(p.currentKeywords, anchor)
+	log.GetInstance().Sugar.Infof("Anchor captured from tool: %+v", anchor)
+	return true
+}
+
+func toFloat(v interface{}) float64 {
+	switch val := v.(type) {
+	case float64:
+		return val
+	case float32:
+		return float64(val)
+	case int:
+		return float64(val)
+	case int64:
+		return float64(val)
+	case json.Number:
+		f, _ := val.Float64()
+		return f
+	case string:
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f
+		}
+	}
+	return 0
+}
+
+func normalizeDuration(min, max float64) (float64, float64, bool) {
+	if min <= 0 && max <= 0 {
+		return 0, 0, false
+	}
+	if min <= 0 {
+		min = max
+	}
+	if max <= 0 {
+		max = min
+	}
+	if max < min {
+		max = min
+	}
+	return min, max, true
+}
+
 // ===== 通用Tool调度器 =====
 
 type toolMode int
@@ -1577,6 +1907,9 @@ func (p *Processor) handleToolCalls(calls []minimax.ToolCall, mode toolMode) {
 
 		case "classify_purchase_intent":
 			p.handleClassifyPurchaseIntentToolCalls([]minimax.ToolCall{tc})
+
+		case "extract_micro_location":
+			p.handleMicroLocationToolCalls([]minimax.ToolCall{tc})
 
 		case "end_conversation":
 			// 轮询通道不执行结束动作，主流程已有统一处理
@@ -1677,6 +2010,21 @@ func (p *Processor) buildEffectiveKeywordsSnapshot() map[string]interface{} {
 			len(p.stagedNonLocation))
 	}
 	return base
+}
+
+func extractAnchorFromSnapshot(snapshot map[string]interface{}) map[string]interface{} {
+	if snapshot == nil {
+		return nil
+	}
+	loc, ok := snapshot["location"].(map[string]interface{})
+	if !ok || loc == nil {
+		return nil
+	}
+	anchor, ok := loc["anchor"].(map[string]interface{})
+	if !ok || anchor == nil || len(anchor) == 0 {
+		return nil
+	}
+	return cloneMapDeep(anchor)
 }
 
 // cloneMapDeep 深拷贝 map[string]interface{}
@@ -1890,6 +2238,9 @@ func (p *Processor) tryRepollForTextWithCtx(waitCtx context.Context, mySeq uint6
 				} else {
 					log.GetInstance().Sugar.Info("Repoll text is outdated; skip sending but apply end-handling if any")
 				}
+				if p.tryServerAutoEnd(p.ctx, msg, msg.Text.Content, txt) {
+					return true
+				}
 				// 应用与主流程一致的结束拦截/收尾逻辑（即使过期也执行，以免错过结束）
 				if p.handleEndAttempt(p.ctx, msg, resp.EndCallData, resp.IsConversationEnd) {
 					return true
@@ -1937,6 +2288,18 @@ func (p *Processor) handleEndAttempt(ctx context.Context, msg *kefu.KFRecvMessag
 		}
 		if err := p.sendAIReply(ctx, msg, confirmText); err != nil {
 			log.GetInstance().Sugar.Warnf("Failed to send pending confirm reply: %v", err)
+		}
+		return true
+	}
+
+	if need, label := p.shouldAskMicroLoc(); need {
+		reply := p.buildMicroLocAsk(label)
+		if err := p.addAssistantMessage(reply, false); err != nil {
+			log.GetInstance().Sugar.Error("Failed to add micro-location prompt: ", err)
+			return true
+		}
+		if err := p.sendAIReply(ctx, msg, reply); err != nil {
+			log.GetInstance().Sugar.Warnf("Failed to send micro-location prompt: %v", err)
 		}
 		return true
 	}
@@ -2195,15 +2558,191 @@ func (p *Processor) mergeStringArrayData(existing, new interface{}) interface{} 
 
 // deepMergeFromFunctionCall Function Call专用合并（统一合并策略）
 func (p *Processor) deepMergeFromFunctionCall(extractedKeywords map[string]interface{}) {
-	// 预处理：标准化数组格式为单值格式
 	preprocessed := p.preprocessExtractedKeywords(extractedKeywords)
 
-	// 使用统一的合并策略，保持双引擎合并的一致性
-	// 字符串数组字段会进行并集去重，结构化字段会覆盖
+	p.keywordsMu.Lock()
+	p.deepMergeKeywordsToMap(preprocessed)
+	p.keywordsMu.Unlock()
+
+	if !p.fcHasAnchorPayload(preprocessed) && p.plateReadyNoAnchorNoOptOut() {
+		if last := strings.TrimSpace(p.getLastUserText()); last != "" {
+			p.maybeParseAndAttachAnchorFromText(last)
+			p.maybeHandleAnchorOptOutFromUser(last)
+		}
+	}
+}
+
+func (p *Processor) fcHasAnchorPayload(pre map[string]interface{}) bool {
+	if pre == nil {
+		return false
+	}
+	if v, ok := pre["anchor"]; ok && v != nil {
+		return true
+	}
+	if v, ok := pre["micro_location"]; ok && v != nil {
+		if m, ok2 := v.(map[string]interface{}); ok2 {
+			if name, _ := m["name"].(string); strings.TrimSpace(name) != "" {
+				return true
+			}
+			if typ, _ := m["type"].(string); strings.TrimSpace(typ) != "" {
+				return true
+			}
+			return len(m) > 0
+		}
+		return true
+	}
+	if v, ok := pre["travel_time_constraints"]; ok && v != nil {
+		if arr, ok2 := v.([]interface{}); ok2 && len(arr) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Processor) plateReadyNoAnchorNoOptOut() bool {
+	p.keywordsMu.RLock()
+	defer p.keywordsMu.RUnlock()
+
+	if p.pendingLoc != nil {
+		if strings.TrimSpace(p.pendingLoc.Plate) == "" {
+			return false
+		}
+		hasAnchor := false
+		optOut := false
+		if p.stagedNonLocation != nil {
+			if _, ok := p.stagedNonLocation["anchor"]; ok {
+				hasAnchor = true
+			}
+			if b, ok := p.stagedNonLocation["micro_location_opt_out"].(bool); ok && b {
+				optOut = true
+			}
+		}
+		if !optOut {
+			if b, ok := p.currentKeywords["micro_location_opt_out"].(bool); ok && b {
+				optOut = true
+			}
+		}
+		return !hasAnchor && !optOut
+	}
+
+	locReady := false
+	anchorExists := false
+	optOut := false
+	if lm, ok := p.currentKeywords["location"].(map[string]interface{}); ok && lm != nil {
+		if plate, ok := lm["plate"].(string); ok && strings.TrimSpace(plate) != "" {
+			locReady = true
+		}
+		if _, ok := lm["anchor"]; ok {
+			anchorExists = true
+		}
+	}
+	if b, ok := p.currentKeywords["micro_location_opt_out"].(bool); ok && b {
+		optOut = true
+	}
+	return locReady && !anchorExists && !optOut
+}
+
+func (p *Processor) getLastUserText() string {
+	p.historyMu.RLock()
+	defer p.historyMu.RUnlock()
+	for i := len(p.conversationHistory) - 1; i >= 0; i-- {
+		msg := p.conversationHistory[i]
+		if msg.Role != "user" {
+			continue
+		}
+		switch content := msg.Content.(type) {
+		case string:
+			return content
+		case []minimax.ContentItem:
+			for _, item := range content {
+				if item.Type == "text" && strings.TrimSpace(item.Text) != "" {
+					return item.Text
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (p *Processor) needMicroLocPrompt() (bool, string) {
+	p.keywordsMu.RLock()
+	defer p.keywordsMu.RUnlock()
+	return p.microLocPromptStateUnsafe()
+}
+
+func (p *Processor) shouldAskMicroLoc() (bool, string) {
 	p.keywordsMu.Lock()
 	defer p.keywordsMu.Unlock()
 
-	p.deepMergeKeywordsToMap(preprocessed)
+	need, label := p.microLocPromptStateUnsafe()
+	if !need {
+		return false, ""
+	}
+	p.microLocAskIntercepted = true
+	return true, label
+}
+
+func (p *Processor) microLocPromptStateUnsafe() (bool, string) {
+	if p.microLocAskIntercepted || p.pendingLoc != nil {
+		return false, ""
+	}
+	kw := p.currentKeywords
+	if kw == nil {
+		return false, ""
+	}
+	loc, ok := kw["location"].(map[string]interface{})
+	if !ok || loc == nil {
+		return false, ""
+	}
+	district := trimStringOrEmpty(loc["district"])
+	plate := trimStringOrEmpty(loc["plate"])
+	if district == "" && plate == "" {
+		return false, ""
+	}
+	if _, ok := loc["anchor"]; ok {
+		return false, ""
+	}
+	if b, ok := kw["micro_location_opt_out"].(bool); ok && b {
+		return false, ""
+	}
+	label := district
+	if plate != "" && district != "" {
+		label = district + "/" + plate
+	} else if plate != "" {
+		label = plate
+	}
+	if strings.TrimSpace(label) == "" {
+		label = "该区域"
+	}
+	return true, label
+}
+
+func (p *Processor) buildMicroLocAsk(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "该区域"
+	}
+	return "已记录位置：" + label + "。为便于更精准匹配，能否再给一个小范围吗？\n" +
+		"· 具体地址/门牌（如“XX街道XX号”）\n" +
+		"· 附近地铁站（如“X号线Y站”）或公交站\n" +
+		"· 明确的地标/商圈/学校/医院/公园等\n" +
+		"如不限定，也可直接回复“不限定”。"
+}
+
+func trimStringOrEmpty(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []byte:
+		return strings.TrimSpace(string(val))
+	case fmt.Stringer:
+		return strings.TrimSpace(val.String())
+	default:
+		return ""
+	}
 }
 
 // preprocessExtractedKeywords 预处理AI提取的关键词（标准化数组格式）
@@ -2556,6 +3095,19 @@ func (p *Processor) tryServerAutoEnd(ctx context.Context, msg *kefu.KFRecvMessag
 		return false
 	}
 
+	if need, label := p.shouldAskMicroLoc(); need {
+		atomic.StoreInt32(&p.autoEndOnce, 0)
+		reply := p.buildMicroLocAsk(label)
+		if err := p.addAssistantMessage(reply, false); err != nil {
+			log.GetInstance().Sugar.Warn("auto-end micro-loc: addAssistantMessage failed: ", err)
+			return true
+		}
+		if err := p.sendAIReply(ctx, msg, reply); err != nil {
+			log.GetInstance().Sugar.Warn("auto-end micro-loc: sendAIReply failed: ", err)
+		}
+		return true
+	}
+
 	// 4) 组装结束文本：若 AI 文本不空，尾部补一行固定结束语；否则只发结束语
 	endLine := "感谢您的咨询，小胖稍后会为您生成详细的房源推荐报告。"
 	final := strings.TrimSpace(aiText)
@@ -2613,6 +3165,17 @@ func (p *Processor) processStressMessage(in *message.InboundMsg) error {
 	userID := msg.ExternalUserID
 	msgID := msg.MsgID
 
+	// 记录接收到的消息ID
+	p.receivedMsgIDsMu.Lock()
+	p.receivedMsgIDs = append(p.receivedMsgIDs, msgID)
+	msgIDsCopy := make([]string, len(p.receivedMsgIDs))
+	copy(msgIDsCopy, p.receivedMsgIDs)
+	p.receivedMsgIDsMu.Unlock()
+
+	// 打印接收到的消息ID列表（用于观察顺序）
+	log.GetInstance().Sugar.Infof("User %s received MsgIDs: %v (total: %d)",
+		userID, msgIDsCopy, len(msgIDsCopy))
+
 	start := time.Now()
 	defer func() {
 		// 记录处理延迟（包括 3s sleep）
@@ -2652,7 +3215,7 @@ func (p *Processor) processStressMessage(in *message.InboundMsg) error {
 	}
 
 	// 模拟业务处理耗时 3 秒
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(3 * time.Second)
 
 	return nil
 }

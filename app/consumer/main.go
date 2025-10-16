@@ -19,14 +19,12 @@ import (
 	prom "qywx/observe/prometheus"
 )
 
-var (
-	consumerHealthGauge = promauto.NewGauge(prometheus.GaugeOpts{
-		Namespace: "qywx",
-		Subsystem: "consumer",
-		Name:      "health_status",
-		Help:      "Health status of the consumer service (1=healthy).",
-	})
-)
+var consumerHealthGauge = promauto.NewGauge(prometheus.GaugeOpts{
+	Namespace: "qywx",
+	Subsystem: "consumer",
+	Name:      "health_status",
+	Help:      "Health status of the consumer service (1=healthy).",
+})
 
 func main() {
 	log.InitLogFileBySvrName("consumer")
@@ -44,14 +42,6 @@ func main() {
 		consumerHealthGauge.Set(1)
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-
-	// 压测 Stop 端点 - 仅在压测模式下注册
-	if cfg.Stress {
-		log.GetInstance().Sugar.Warn("Stress test mode enabled, /stop endpoint registered")
-		router.POST("/stop", func(c *gin.Context) {
-			handleStopRequest(c, scheduler)
-		})
-	}
 
 	httpAddr := cfg.Services.Consumer.HTTPAddr
 	if httpAddr == "" {

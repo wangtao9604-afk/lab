@@ -9,8 +9,8 @@ import (
 
 const (
 	templateUserID = "wm6Gh8CQAAsJJJC8czVaRraSVQEWIzSw"
-	userIDCount    = 1000
-	partitionCount = 16
+	userIDCount    = 5000
+	partitionCount = 32
 )
 
 // UserIDData 存储 UserID 及其分区信息
@@ -108,7 +108,7 @@ func generateSuffixForPartition(prefix string, targetPartition int, startSeed ui
 	panic(fmt.Sprintf("failed to find suffix for partition %d after 1000000 attempts", targetPartition))
 }
 
-// generateUserIDs 生成 1000 个 UserID，确保均匀分配到 16 个 Kafka 分区
+// generateUserIDs 生成 5000 个 UserID，确保均匀分配到 32 个 Kafka 分区
 func generateUserIDs() *UserIDData {
 	userIDs := make([]string, userIDCount)
 	partitionMapping := make(map[string]int, userIDCount)
@@ -193,7 +193,7 @@ func main() {
 	}
 
 	// 写入 JSON 文件
-	outputPath := filepath.Join("app", "stress", "userids.json")
+	outputPath := filepath.Join("app", "stress", "userids_5000.json")
 	file, err := os.Create(outputPath)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create file: %v", err))

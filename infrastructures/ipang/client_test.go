@@ -1,20 +1,20 @@
 package ipang
 
 import (
-    "encoding/json"
-    "reflect"
-    "strings"
-    "testing"
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
 )
 
 func TestGenerateNonce(t *testing.T) {
 	nonce1 := generateNonce()
 	nonce2 := generateNonce()
-	
+
 	if len(nonce1) != 32 {
 		t.Errorf("nonce length should be 32, got %d", len(nonce1))
 	}
-	
+
 	if nonce1 == nonce2 {
 		t.Error("nonce should be different each time")
 	}
@@ -25,21 +25,23 @@ func TestCalculateSignature(t *testing.T) {
 		appID:     "xp6121770875700571",
 		appSecret: "VnaAJspwH89hPtu3ef2EGZL75MjYvcB6",
 	}
-	
+
 	params := map[string]string{
 		"amount":    "1000",
 		"apikey":    "xp6121770875700571",
 		"area":      "",
 		"count":     "3",
+		"location":  "",
 		"nonce":     "ei781pf416kiyshraia188elpaw69d49",
 		"plate":     "",
+		"radius":    "",
 		"size":      "80,160",
 		"timestamp": "1755576608",
 	}
-	
+
 	signature := client.calculateSignature(params)
-	expected := "50e7c3af89533a8790b31507b4134a09"
-	
+	expected := "c6a9c783a6e15c615dc7c32217a81eea"
+
 	if signature != expected {
 		t.Errorf("signature mismatch: expected %s, got %s", expected, signature)
 	}
@@ -48,13 +50,15 @@ func TestCalculateSignature(t *testing.T) {
 func TestQueryParams(t *testing.T) {
 	// 测试QueryParams结构体
 	params := &QueryParams{
-		Area:   "静安区",
-		Amount: "800,1200",
-		Count:  "3,4",
-		Plate:  "浦江,七宝",
-		Size:   "100,150",
+		Area:     "静安区",
+		Amount:   "800,1200",
+		Count:    "3,4",
+		Plate:    "浦江,七宝",
+		Size:     "100,150",
+		Location: "121.1,31.2",
+		Radius:   "1000",
 	}
-	
+
 	if params.Area != "静安区" {
 		t.Errorf("Area should be 静安区, got %s", params.Area)
 	}
@@ -64,20 +68,20 @@ func TestQueryParams(t *testing.T) {
 func TestIntegration(t *testing.T) {
 	// 跳过集成测试，除非明确需要
 	t.Skip("Skipping integration test - requires real API")
-	
+
 	client := NewClient()
-	
+
 	// 测试查询
 	properties, err := client.Query(&QueryParams{
 		Amount: "1000",
 		Size:   "80,160",
 		Count:  "3",
 	})
-	
+
 	if err != nil {
 		t.Errorf("Query failed: %v", err)
 	}
-	
+
 	if properties == nil {
 		t.Error("Properties should not be nil")
 	}
@@ -89,7 +93,7 @@ func TestNewClient(t *testing.T) {
 	if client == nil {
 		t.Error("NewClient should not return nil")
 	}
-	
+
 	// 验证每次创建都是新实例
 	client2 := NewClient()
 	if client == client2 {
@@ -104,18 +108,18 @@ func TestNewClientWithConfig(t *testing.T) {
 		"test_secret",
 		"https://test.api.com",
 	)
-	
+
 	if client.appID != "test_app_id" {
 		t.Errorf("appID should be test_app_id, got %s", client.appID)
 	}
-	
+
 	// 测试默认值
 	clientWithDefaults := NewClientWithConfig(
 		"test_app_id",
 		"test_secret",
-		"",  // 空baseURL应该使用默认值
+		"", // 空baseURL应该使用默认值
 	)
-	
+
 	if clientWithDefaults.baseURL != "https://ai.ipangsell.com" {
 		t.Errorf("baseURL should use default, got %s", clientWithDefaults.baseURL)
 	}
@@ -134,15 +138,17 @@ func TestPOSTSignatureWithQas(t *testing.T) {
 		"apikey":    "xp6121770875700571",
 		"area":      "",
 		"count":     "3",
+		"location":  "",
 		"nonce":     "omq6xs3hmfdejm468mxqxb978zuxgrjs",
 		"plate":     "",
 		"qas":       `[{"q": "请问您有什么问题？", "a": "1000万在哪里买房子比较好"}, {"q": "面积有要求吗？", "a": "100平左右"}]`,
+		"radius":    "",
 		"size":      "80,160",
 		"timestamp": "1757576460",
 	}
 
 	signature := client.calculateSignature(params)
-	expected := "baa7ea3bceeab03ba1a6f953e282f911"
+	expected := "c708f10dab9a4371c535cec6e8b8fc0b"
 
 	if signature != expected {
 		t.Errorf("POST signature with qas mismatch: expected %s, got %s", expected, signature)
@@ -173,11 +179,19 @@ func TestBuildAndSignParamsForPOST(t *testing.T) {
 	if postParams["qas"] != params.Qas {
 		t.Errorf("qas field value mismatch: expected %s, got %s", params.Qas, postParams["qas"])
 	}
+	if _, exists := postParams["location"]; !exists {
+		t.Error("POST mode should include location field")
+	}
+	if _, exists := postParams["radius"]; !exists {
+		t.Error("POST mode should include radius field")
+	}
 
 	// 测试POST模式下qas为空字符串的情况
 	emptyQasParams := &QueryParams{
-		Amount: "1000",
-		Qas:    "", // 空字符串
+		Amount:   "1000",
+		Qas:      "", // 空字符串
+		Location: "",
+		Radius:   "",
 	}
 	postParamsEmpty := client.buildAndSignParams(emptyQasParams, true)
 	if _, exists := postParamsEmpty["qas"]; !exists {
@@ -186,11 +200,23 @@ func TestBuildAndSignParamsForPOST(t *testing.T) {
 	if postParamsEmpty["qas"] != "" {
 		t.Errorf("qas field should be empty string, got %s", postParamsEmpty["qas"])
 	}
+	if postParamsEmpty["location"] != "" {
+		t.Errorf("location field should default to empty string, got %s", postParamsEmpty["location"])
+	}
+	if postParamsEmpty["radius"] != "" {
+		t.Errorf("radius field should default to empty string, got %s", postParamsEmpty["radius"])
+	}
 
 	// 测试GET模式：空qas字段不应该包含
 	getParams := client.buildAndSignParams(emptyQasParams, false)
 	if _, exists := getParams["qas"]; exists {
 		t.Error("GET mode should not include empty qas field")
+	}
+	if _, exists := getParams["location"]; !exists {
+		t.Error("GET mode should include location field")
+	}
+	if _, exists := getParams["radius"]; !exists {
+		t.Error("GET mode should include radius field")
 	}
 }
 
@@ -248,26 +274,26 @@ func TestParsePostResponseWithErrorFields(t *testing.T) {
 	}
 
 	// 验证新房错误分析字段
-    if response.Detail.NewHouseError != "价格范围内无新房" {
-        t.Errorf("expected new_house_error to be parsed correctly, got %s", response.Detail.NewHouseError)
-    }
-    if !reflect.DeepEqual([]string(response.Detail.NewHouseExistParams), []string{"area", "count"}) {
-        t.Errorf("expected new_house_exist_params to be [area count], got %v", []string(response.Detail.NewHouseExistParams))
-    }
-    if !reflect.DeepEqual([]string(response.Detail.NewHouseNoExistParams), []string{"amount"}) {
-        t.Errorf("expected new_house_no_exist_params to be [amount], got %v", []string(response.Detail.NewHouseNoExistParams))
-    }
+	if response.Detail.NewHouseError != "价格范围内无新房" {
+		t.Errorf("expected new_house_error to be parsed correctly, got %s", response.Detail.NewHouseError)
+	}
+	if !reflect.DeepEqual([]string(response.Detail.NewHouseExistParams), []string{"area", "count"}) {
+		t.Errorf("expected new_house_exist_params to be [area count], got %v", []string(response.Detail.NewHouseExistParams))
+	}
+	if !reflect.DeepEqual([]string(response.Detail.NewHouseNoExistParams), []string{"amount"}) {
+		t.Errorf("expected new_house_no_exist_params to be [amount], got %v", []string(response.Detail.NewHouseNoExistParams))
+	}
 
 	// 验证二手房错误分析字段
-    if response.Detail.SecHouseError != "该区域无二手房源" {
-        t.Errorf("expected sec_house_error to be parsed correctly, got %s", response.Detail.SecHouseError)
-    }
-    if !reflect.DeepEqual([]string(response.Detail.SecHouseExistParams), []string{"area"}) {
-        t.Errorf("expected sec_house_exist_params to be [area], got %v", []string(response.Detail.SecHouseExistParams))
-    }
-    if !reflect.DeepEqual([]string(response.Detail.SecHouseNoExistParams), []string{"amount", "count"}) {
-        t.Errorf("expected sec_house_no_exist_params to be [amount count], got %v", []string(response.Detail.SecHouseNoExistParams))
-    }
+	if response.Detail.SecHouseError != "该区域无二手房源" {
+		t.Errorf("expected sec_house_error to be parsed correctly, got %s", response.Detail.SecHouseError)
+	}
+	if !reflect.DeepEqual([]string(response.Detail.SecHouseExistParams), []string{"area"}) {
+		t.Errorf("expected sec_house_exist_params to be [area], got %v", []string(response.Detail.SecHouseExistParams))
+	}
+	if !reflect.DeepEqual([]string(response.Detail.SecHouseNoExistParams), []string{"amount", "count"}) {
+		t.Errorf("expected sec_house_no_exist_params to be [amount count], got %v", []string(response.Detail.SecHouseNoExistParams))
+	}
 
 	// 验证基础字段也正确解析
 	if response.Detail.PdfUrl != "http://example.com/report.pdf" {
@@ -511,33 +537,33 @@ func TestQAStructAndSerialization(t *testing.T) {
 
 // TestStrList_UnmarshalArray 测试StrList从数组反序列化
 func TestStrList_UnmarshalArray(t *testing.T) {
-    var s StrList
-    if err := json.Unmarshal([]byte(`["a","b","c"]`), &s); err != nil {
-        t.Fatalf("unmarshal array failed: %v", err)
-    }
-    want := []string{"a", "b", "c"}
-    if !reflect.DeepEqual([]string(s), want) {
-        t.Fatalf("expected %v, got %v", want, []string(s))
-    }
+	var s StrList
+	if err := json.Unmarshal([]byte(`["a","b","c"]`), &s); err != nil {
+		t.Fatalf("unmarshal array failed: %v", err)
+	}
+	want := []string{"a", "b", "c"}
+	if !reflect.DeepEqual([]string(s), want) {
+		t.Fatalf("expected %v, got %v", want, []string(s))
+	}
 }
 
 // TestStrList_UnmarshalString 测试StrList从逗号分隔字符串反序列化
 func TestStrList_UnmarshalString(t *testing.T) {
-    var s StrList
-    if err := json.Unmarshal([]byte(`"a,b , c"`), &s); err != nil {
-        t.Fatalf("unmarshal string failed: %v", err)
-    }
-    want := []string{"a", "b", "c"}
-    if !reflect.DeepEqual([]string(s), want) {
-        t.Fatalf("expected %v, got %v", want, []string(s))
-    }
+	var s StrList
+	if err := json.Unmarshal([]byte(`"a,b , c"`), &s); err != nil {
+		t.Fatalf("unmarshal string failed: %v", err)
+	}
+	want := []string{"a", "b", "c"}
+	if !reflect.DeepEqual([]string(s), want) {
+		t.Fatalf("expected %v, got %v", want, []string(s))
+	}
 
-    // 空字符串应得到空切片
-    var s2 StrList
-    if err := json.Unmarshal([]byte(`""`), &s2); err != nil {
-        t.Fatalf("unmarshal empty string failed: %v", err)
-    }
-    if len(s2) != 0 {
-        t.Fatalf("expected empty list, got %v", []string(s2))
-    }
+	// 空字符串应得到空切片
+	var s2 StrList
+	if err := json.Unmarshal([]byte(`""`), &s2); err != nil {
+		t.Fatalf("unmarshal empty string failed: %v", err)
+	}
+	if len(s2) != 0 {
+		t.Fatalf("expected empty list, got %v", []string(s2))
+	}
 }

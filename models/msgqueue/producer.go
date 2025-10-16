@@ -109,7 +109,8 @@ func (kp *KafkaProducer) ProduceKFMessage(msg *kefu.KFRecvMessage) error {
 
 	keyStr := msg.ExternalUserID
 	if keyStr == "" {
-		keyStr = msg.MsgID
+		// 强约束：如果没有 ExternalUserID，就不要投到“聊天业务 Topic”
+		return fmt.Errorf("produce message: external_user_id empty (skip chat topic)")
 	}
 	key := []byte(keyStr)
 
