@@ -7,6 +7,9 @@ CREATE DATABASE IF NOT EXISTS `ipang`
   DEFAULT CHARACTER SET = utf8mb4
   DEFAULT COLLATE = utf8mb4_0900_ai_ci;
 
+-- 如果已经事先创建了ipang数据库，运行下面的命令修改字符集
+ALTER DATABASE ipang CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+
 
 -- 切换至目标库
 USE `ipang`;

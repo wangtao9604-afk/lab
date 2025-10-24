@@ -9,6 +9,7 @@ import (
 	qconfig "qywx/infrastructures/config"
 	qlog "qywx/infrastructures/log"
 	"qywx/infrastructures/mq/kmq"
+	"qywx/infrastructures/utils"
 	"qywx/infrastructures/wxmsg/kefu"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -108,10 +109,22 @@ func (kp *KafkaProducer) ProduceKFMessage(msg *kefu.KFRecvMessage) error {
 	}
 
 	keyStr := msg.ExternalUserID
-	if keyStr == "" {
-		// 强约束：如果没有 ExternalUserID，就不要投到“聊天业务 Topic”
-		return fmt.Errorf("produce message: external_user_id empty (skip chat topic)")
+	if len(keyStr) == 0 {
+		if msg.MsgType == "text" {
+			// 强约束：如果没有 ExternalUserID，就不要投到“聊天业务 Topic”
+			return fmt.Errorf("produce message: external_user_id empty (skip chat topic)")
+		} else if msg.MsgType == "event" {
+			if msg.Event != nil {
+				keyStr = msg.Event.ExternalUserID
+			}
+		}
 	}
+
+	// 兜底策略
+	if len(keyStr) == 0 {
+		keyStr = fmt.Sprintf("%d", utils.Now().UnixNano())
+	}
+
 	key := []byte(keyStr)
 
 	headers := make([]kafka.Header, 0, 5)

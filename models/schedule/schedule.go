@@ -112,6 +112,7 @@ type Processor struct {
 	thinkWaiterMu      sync.Mutex
 	thinkWaiterRunning bool
 	lastPlaceholderAt  time.Time
+	lastPlaceholderSeq uint64
 	thinkWaiterCtx     context.Context
 	thinkWaiterCancel  context.CancelFunc
 	turnSeq            uint64

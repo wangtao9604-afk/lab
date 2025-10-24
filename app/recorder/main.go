@@ -122,10 +122,10 @@ func main() {
 				logger.Infof("partition assigned: topic=%s partition=%d offset=%d", topic, partition, startOffset)
 			},
 			OnRevoked: func(topic string, partition int32) {
-				logger.Infof("partition revoked: topic=%s partition=%d", topic, partition)
+				logger.Infof("OnRevoked: partition revoked: topic=%s partition=%d", topic, partition)
 			},
 			OnLost: func(topic string, partition int32) {
-				logger.Infof("partition revoked: topic=%s partition=%d", topic, partition)
+				logger.Infof("OnLost: partition revoked: topic=%s partition=%d", topic, partition)
 			},
 		}),
 	)

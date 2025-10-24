@@ -42,6 +42,7 @@ var (
 	promisePhrases = []string{
 		"我会为您推荐", "我会为你推荐", "我将为您", "我将为你",
 		"为您生成", "为你生成", "我来生成", "我来准备", "马上为您", "稍后为您",
+		"我会为您匹配", "我会为你匹配", "我来匹配",
 		"我现在去准备", "我会尽快生成", "我马上为您生成", "我马上为你生成",
 	}
 )
@@ -437,6 +438,7 @@ func (p *Processor) handleTextMessage(ctx context.Context, deadline time.Time, m
 
 	// 4. 处理AI回复内容
 	responseContent := p.extractResponseContent(aiResponse.Content)
+	responseContent = p.suppressDecorationAskIfSecondHand(responseContent)
 
 	// 若模型本轮没有显式 end，但已具备核心条件 + 命中触发词，则由服务端自动结束并进入后续流程
 	if !aiResponse.IsConversationEnd {
@@ -657,6 +659,56 @@ func (p *Processor) extractResponseContent(fullContent string) string {
 	}
 
 	return responseContent
+}
+
+// suppressDecorationAskIfSecondHand 在二手房意向下抑制装修相关问句
+func (p *Processor) suppressDecorationAskIfSecondHand(text string) string {
+	if strings.TrimSpace(text) == "" || p.getPurchaseIntent() != IntentSecond {
+		return text
+	}
+
+	decoTokens := []string{"装修", "毛坯", "简装", "精装", "豪装", "中装"}
+	askHints := []string{"？", "?", "吗", "是否", "更倾向", "要不要", "需不需要", "考虑", "方便", "介意"}
+	keepHints := []string{"已收到", "我已收到", "我收到", "收到了"}
+
+	hasAny := func(s string, arr []string) bool {
+		for _, a := range arr {
+			if strings.Contains(s, a) {
+				return true
+			}
+		}
+		return false
+	}
+
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	suppressed := 0
+
+	for _, ln := range lines {
+		l := strings.TrimSpace(ln)
+		if l == "" {
+			out = append(out, ln)
+			continue
+		}
+
+		if hasAny(l, decoTokens) {
+			isQuestion := hasAny(l, askHints)
+			isKeep := hasAny(l, keepHints) && !isQuestion
+			if isQuestion && !isKeep {
+				suppressed++
+				continue
+			}
+		}
+		out = append(out, ln)
+	}
+
+	if suppressed > 0 {
+		log.GetInstance().Sugar.Debugf("Suppressed %d decoration-ask lines (intent=二手房)", suppressed)
+	}
+
+	joined := strings.Join(out, "\n")
+	clean := regexp.MustCompile(`\n{3,}`).ReplaceAllString(joined, "\n\n")
+	return strings.TrimSpace(clean)
 }
 
 // removeJSONCodeBlocks 移除内容中的JSON代码块
@@ -956,7 +1008,7 @@ func (p *Processor) removeToolCallAnnotations(content string) string {
 
 // sendAIReply 发送AI回复给用户
 func (p *Processor) sendAIReply(ctx context.Context, originalMsg *kefu.KFRecvMessage, content string) error {
-	replyMsg, err := p.newReplyMessage(originalMsg, fmt.Sprintf("ai_reply_%d", utils.Now().Unix()))
+	replyMsg, err := p.newReplyMessage(originalMsg, fmt.Sprintf("ai_reply_%d", utils.Now().UnixNano()))
 	if err != nil {
 		return err
 	}
@@ -975,7 +1027,7 @@ func (p *Processor) sendAIReply(ctx context.Context, originalMsg *kefu.KFRecvMes
 
 // sendFallbackReply 发送备用回复（仅在API调用失败时使用）
 func (p *Processor) sendFallbackReply(ctx context.Context, msg *kefu.KFRecvMessage) error {
-	replyMsg, err := p.newReplyMessage(msg, fmt.Sprintf("fallback_%d", utils.Now().Unix()))
+	replyMsg, err := p.newReplyMessage(msg, fmt.Sprintf("fallback_%d", utils.Now().UnixNano()))
 	if err != nil {
 		return err
 	}
@@ -1284,7 +1336,7 @@ func (p *Processor) getCurrentPlate() string {
 	}
 	if lm, ok := p.currentKeywords["location"].(map[string]interface{}); ok {
 		if s, ok := lm["plate"].(string); ok {
-			return s
+			return sanitizePlateName(s)
 		}
 	}
 	return ""
@@ -1296,7 +1348,7 @@ func (p *Processor) mergeLocationIntoRecord(record map[string]interface{}, provi
 		return
 	}
 	district = strings.TrimSpace(district)
-	plate = strings.TrimSpace(plate)
+	plate = sanitizePlateName(plate)
 	if district != "" && plate != "" && strings.EqualFold(district, plate) {
 		plate = ""
 	}
@@ -1305,6 +1357,9 @@ func (p *Processor) mergeLocationIntoRecord(record map[string]interface{}, provi
 		// 复制以避免共享引用副作用
 		for k, val := range v {
 			lm[k] = val
+		}
+		if existing, ok := lm["plate"].(string); ok && sanitizePlateName(existing) == "" {
+			delete(lm, "plate")
 		}
 	}
 	if strings.TrimSpace(province) != "" {
@@ -1315,6 +1370,8 @@ func (p *Processor) mergeLocationIntoRecord(record map[string]interface{}, provi
 	}
 	if plate != "" {
 		lm["plate"] = plate
+	} else {
+		delete(lm, "plate")
 	}
 	if strings.TrimSpace(landmark) != "" {
 		lm["landmark"] = landmark
@@ -1493,7 +1550,7 @@ func (p *Processor) maybeHandleAnchorOptOutFromUser(text string) {
 
 // beginPending 进入待确认阶段
 func (p *Processor) beginPending(district, plate string) {
-	p.pendingLoc = &PendingLoc{City: "上海市", District: district, Plate: plate}
+	p.pendingLoc = &PendingLoc{City: "上海市", District: district, Plate: sanitizePlateName(plate)}
 	// 重置暂存
 	p.stagedNonLocation = make(map[string]interface{})
 	// 默认保守：不重置非location维度，除非用户明确要求
@@ -1511,7 +1568,7 @@ func (p *Processor) commitPending(confirmDistrict, confirmPlate string) {
 	}
 	// 优先使用函数返回，其次使用pending中的值
 	newDistrict := p.normalizeDistrict(firstNonEmpty(confirmDistrict, p.pendingLoc.District))
-	newPlate := strings.TrimSpace(firstNonEmpty(confirmPlate, p.pendingLoc.Plate))
+	newPlate := sanitizePlateName(firstNonEmpty(confirmPlate, p.pendingLoc.Plate))
 
 	log.GetInstance().Sugar.Infof("Committing location change: confirm[district=%s, plate=%s], current[%s/%s]",
 		newDistrict, newPlate, p.finalLoc.District, p.getCurrentPlate())
@@ -1947,7 +2004,7 @@ func (p *Processor) parseLocationValue(value interface{}) (province, district, p
 			district = v
 		}
 		if v, ok := m["plate"].(string); ok {
-			plate = v
+			plate = sanitizePlateName(v)
 		}
 		if v, ok := m["landmark"].(string); ok {
 			landmark = v
@@ -2123,10 +2180,12 @@ func (p *Processor) startThinkingWaiter(ctx context.Context, msg *kefu.KFRecvMes
 		log.GetInstance().Sugar.Infof("Thinking waiter started: seq=%d", mySeq)
 
 		// 立即占位（不入历史，受冷却保护）
-		if !p.isOutdatedSeq(mySeq) && time.Since(p.lastPlaceholderAt) > 30*time.Second {
+		shouldSendImmediate := (p.lastPlaceholderSeq != mySeq) || time.Since(p.lastPlaceholderAt) > 30*time.Second
+		if !p.isOutdatedSeq(mySeq) && shouldSendImmediate {
 			placeholder := "小胖正在思考中，很快给您回复哦…"
 			if err := p.sendAIReply(p.ctx, msg, placeholder); err == nil {
 				p.lastPlaceholderAt = time.Now()
+				p.lastPlaceholderSeq = mySeq
 				log.GetInstance().Sugar.Info("Immediate thinking placeholder sent to ", msg.ExternalUserID)
 			} else {
 				log.GetInstance().Sugar.Warnf("Failed to send immediate placeholder: %v", err)
@@ -2143,6 +2202,7 @@ func (p *Processor) startThinkingWaiter(ctx context.Context, msg *kefu.KFRecvMes
 			placeholder := "我在梳理您的需求，马上回复您～"
 			if err := p.sendAIReply(p.ctx, msg, placeholder); err == nil {
 				p.lastPlaceholderAt = time.Now()
+				p.lastPlaceholderSeq = mySeq
 				log.GetInstance().Sugar.Info("Secondary thinking placeholder sent to ", msg.ExternalUserID)
 			} else {
 				log.GetInstance().Sugar.Warnf("Failed to send secondary placeholder: %v", err)
@@ -2219,7 +2279,9 @@ func (p *Processor) tryRepollForTextWithCtx(waitCtx context.Context, mySeq uint6
 				}
 			}
 			// 再尝试抽取自然语言
-			txt := strings.TrimSpace(p.extractResponseContent(resp.Content))
+			txtRaw := p.extractResponseContent(resp.Content)
+			txtFiltered := p.suppressDecorationAskIfSecondHand(txtRaw)
+			txt := strings.TrimSpace(txtFiltered)
 			log.GetInstance().Sugar.Debugf("Repoll(%s/%v) content_len=%d", toolChoice, withNudge, len(txt))
 			if txt != "" {
 				// 若本轮已过期，不把文本发给用户，但仍继续按一致的结束/收尾逻辑处理，避免错过及时结束
@@ -2722,7 +2784,7 @@ func (p *Processor) buildMicroLocAsk(label string) string {
 	if label == "" {
 		label = "该区域"
 	}
-	return "已记录位置：" + label + "。为便于更精准匹配，能否再给一个小范围吗？\n" +
+	return "已收到位置：" + label + "。为便于更精准匹配，能否再给一个小范围吗？\n" +
 		"· 具体地址/门牌（如“XX街道XX号”）\n" +
 		"· 附近地铁站（如“X号线Y站”）或公交站\n" +
 		"· 明确的地标/商圈/学校/医院/公园等\n" +
@@ -2917,9 +2979,9 @@ func (p *Processor) buildProbingReply() string {
 	}
 
 	if len(parts) > 0 {
-		return fmt.Sprintf("我已记录：%s。%s", strings.Join(parts, "、"), question)
+		return fmt.Sprintf("我已收到：%s。%s", strings.Join(parts, "、"), question)
 	}
-	return fmt.Sprintf("我已记录您的需求。%s", question)
+	return fmt.Sprintf("我已收到您的需求。%s", question)
 }
 
 // pickMostImportantMissing 根据当前已知信息选择一个优先级最高的缺失项
@@ -3141,7 +3203,7 @@ func containsAny(text string, arr []string) bool {
 	}
 	for _, s := range arr {
 		if s == "？" || s == "?" {
-			if strings.Contains(t, "?") || strings.Contains(t, "？") {
+			if regexp.MustCompile(`[\?？]+`).MatchString(t) {
 				return true
 			}
 			continue
@@ -3151,6 +3213,18 @@ func containsAny(text string, arr []string) bool {
 		}
 	}
 	return false
+}
+
+// sanitizePlateName 统一清理板块占位符，避免被当做真实板块
+func sanitizePlateName(raw string) string {
+	clean := strings.TrimSpace(raw)
+	if clean == "" {
+		return ""
+	}
+	if strings.Contains(clean, "未指定") {
+		return ""
+	}
+	return clean
 }
 
 // processStressMessage 压测模式下处理消息

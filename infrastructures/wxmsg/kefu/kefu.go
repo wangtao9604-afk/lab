@@ -7,6 +7,7 @@ import (
 
 	"qywx/infrastructures/httplib"
 	"qywx/infrastructures/log"
+	"qywx/infrastructures/utils"
 )
 
 // 客服消息类型常量
@@ -234,6 +235,9 @@ func SendKFText(msg *KFTextMessage) (*KFResult, error) {
 	if msg == nil {
 		return nil, errors.New("nil message")
 	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
+	}
 	msg.MsgType = KFMsgTypeText
 	return sendKFMessage(msg, msg.CorpToken)
 }
@@ -242,6 +246,9 @@ func SendKFText(msg *KFTextMessage) (*KFResult, error) {
 func SendKFImage(msg *KFImageMessage) (*KFResult, error) {
 	if msg == nil {
 		return nil, errors.New("nil message")
+	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
 	}
 	msg.MsgType = KFMsgTypeImage
 	return sendKFMessage(msg, msg.CorpToken)
@@ -252,6 +259,9 @@ func SendKFVoice(msg *KFVoiceMessage) (*KFResult, error) {
 	if msg == nil {
 		return nil, errors.New("nil message")
 	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
+	}
 	msg.MsgType = KFMsgTypeVoice
 	return sendKFMessage(msg, msg.CorpToken)
 }
@@ -260,6 +270,9 @@ func SendKFVoice(msg *KFVoiceMessage) (*KFResult, error) {
 func SendKFVideo(msg *KFVideoMessage) (*KFResult, error) {
 	if msg == nil {
 		return nil, errors.New("nil message")
+	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
 	}
 	msg.MsgType = KFMsgTypeVideo
 	return sendKFMessage(msg, msg.CorpToken)
@@ -270,6 +283,9 @@ func SendKFFile(msg *KFFileMessage) (*KFResult, error) {
 	if msg == nil {
 		return nil, errors.New("nil message")
 	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
+	}
 	msg.MsgType = KFMsgTypeFile
 	return sendKFMessage(msg, msg.CorpToken)
 }
@@ -279,6 +295,9 @@ func SendKFLink(msg *KFLinkMessage) (*KFResult, error) {
 	if msg == nil {
 		return nil, errors.New("nil message")
 	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
+	}
 	msg.MsgType = KFMsgTypeLink
 	return sendKFMessage(msg, msg.CorpToken)
 }
@@ -287,6 +306,9 @@ func SendKFLink(msg *KFLinkMessage) (*KFResult, error) {
 func SendKFMiniprogram(msg *KFMiniprogramMessage) (*KFResult, error) {
 	if msg == nil {
 		return nil, errors.New("nil message")
+	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
 	}
 	msg.MsgType = KFMsgTypeMiniprogram
 	return sendKFMessage(msg, msg.CorpToken)
@@ -299,6 +321,9 @@ func SendKFMenu(msg *KFMenuMessage) (*KFResult, error) {
 	}
 	if len(msg.MsgMenu.List) == 0 {
 		return nil, errors.New("menu list cannot be empty")
+	}
+	if len(msg.MsgID) == 0 {
+		msg.MsgID = fmt.Sprintf("%d", utils.Now().UnixNano())
 	}
 	msg.MsgType = KFMsgTypeMenu
 	return sendKFMessage(msg, msg.CorpToken)
