@@ -1,5 +1,5 @@
 environment = "dev"  # 环境类型: dev|prod|container
-domain = "work.ipangsell.com"
+domain = "minimax.ipangsell.com"
 platform = 2  # 1=web, 2=mobile, 3=ignore
 
 [log]
@@ -10,9 +10,9 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
 [redises]
     [redises.General]  # 通用Redis实例配置
         useSentinel = true
-        addr = "192.168.57.40:6379"
-        sentinelAddrs = ["192.168.57.40:26379", "192.168.57.41:26379", "192.168.57.42:26379"]
-        masterName = "mymaster"
+        addr = ""
+        sentinelAddrs = ["r-uf6w1cyx6dow2cc5z5.redis.rds.aliyuncs.com:6379"]
+        masterName = "redis_master"
         sentinelPassword = ""
         user = ""
         password = ""
@@ -25,13 +25,13 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
         writeTimeout = 3   # 写入超时(秒)
 
 [suite]
-    token = "SAWVIkc6j4MCfKLkA9Ui"
-    encodingAESKey =  "jRdtDbVA32kBHvEbAHvs54t3oAkrDz8tveCTKQz7fGF"
+    token = "CkVrLV1hF6sfNFwQrp0c"
+    encodingAESKey =  "ChSxQ72OW4Fu4DzFBwkMkK3VbjHENw3N2d8K3BJZx61"
     suiteId = "ww24103d9c43d9ccc6"
-    agentId = "1000008"
-    secret = "sn3rsN86xfBEwr-Zo3mah3CnlNkA6o0MZnI_xCavLx4"
+    agentId = "1000007"
+    secret = "CezDsHu0inUlG1nsp7qsKE1D6xjyayzHcI9nLxWqENc"
     ticketTimeOut = 600
-    kfId = "wk6Gh8CQAAH3T-AxpjWbx8Ybhw84AFnQ"
+    kfId = "wk6Gh8CQAAzVDDh-FSfINc1O_iedSUJQ"
 
 [misc]
     templateId = ""
@@ -43,7 +43,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
 [schedule]
     processorLifetimeMinutes = 30    # 用户会话生命周期 (分钟)
     compactHistory = true            # 是否压缩历史（默认false）
-    maxHistoryLength = 16            # 压缩时保留的消息数
+    maxHistoryLength = 20            # 压缩时保留的消息数
 
 [services.producer]
     httpAddr = ":11112"
@@ -68,7 +68,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
     travelSpeedWalkMpm = 80
     travelSpeedBikeMpm = 230
     travelSpeedDriveMpm = 800
-    
+
 # 高德地图API配置
 [gaode]
     apiKey = "909bd767aca3851fbcbb665e421fc5e9"  # 高德地图Web服务API Key
@@ -76,7 +76,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
     timeout = 10                                 # 请求超时时间（秒）
 
 [kafka]
-    brokers = "192.168.57.30:9092,192.168.57.31:9092,192.168.57.32:9092"
+    brokers = "alikafka-post-cn-9a94hpq1n004-1-vpc.alikafka.aliyuncs.com:9092,alikafka-post-cn-9a94hpq1n004-2-vpc.alikafka.aliyuncs.com:9092,alikafka-post-cn-9a94hpq1n004-3-vpc.alikafka.aliyuncs.com:9092"
 
     [kafka.producer.chat]
         clientId = "qywx-producer"
@@ -94,7 +94,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
         statisticsIntervalMs = 60000
         goDeliveryReportFields = "key,value,headers"
         partitioner = "murmur2_random"
-    
+
     [kafka.producer.recorder]
         clientId = "qywx-producer-recorder"
         acks = "all"
@@ -111,7 +111,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
         statisticsIntervalMs = 60000
         goDeliveryReportFields = "key,value,headers"
         partitioner = "murmur2_random"
-        messageMaxBytes = 6291456
+        messageMaxBytes = 3145728
 
     [kafka.consumer.chat]
         debug = "conf"
@@ -127,7 +127,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
         fetchWaitMaxMs = 50
         statisticsIntervalMs = 60000
         socketKeepaliveEnable = true
-    
+
     [kafka.consumer.recorder]
         debug = "conf"
         groupId = "qywx-recorder-group"
@@ -164,8 +164,8 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
         numPartitions = 24
         replicationFactor = 3
         cleanupPolicy = "delete"
-        retentionMs = 604800000
-        maxMessageBytes = 6291456
+        retentionMs = 259200
+        maxMessageBytes = 3145728
 
 [fetcher]
     enabled = true
@@ -174,19 +174,19 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
     pollIntervalMs = 1000
     kafkaGroupId = "kf-fetcher-group"
     kafkaClientId = "kf-fetcher-client"
-    localShadowPath = "var/kf_cursor_wk6Gh8CQAAH3T-AxpjWbx8Ybhw84AFnQ.json"
+    localShadowPath = "var/wk6Gh8CQAAzVDDh-FSfINc1O_iedSUJQ.json"
 
     [fetcher.redis]
         useSentinel = true
-        addr = "192.168.57.40:6379"
+        addr = ""
         password = ""
         db = 2
-        sentinelAddrs = ["192.168.57.40:26379", "192.168.57.41:26379", "192.168.57.42:26379"]
+        sentinelAddrs = ["r-uf6w1cyx6dow2cc5z5.redis.rds.aliyuncs.com:6379"]
         sentinelPassword = ""
-        masterName = "mymaster"
+        masterName = "redis_master"
 
 [mysql]
-    dsn = "admin:AdminPass#2025@tcp(192.168.57.60:3306)/ipang?parseTime=true&loc=Asia%2FShanghai&charset=utf8mb4"
+    dsn = "admin_ipang:AdminPass#2025@tcp(rm-uf6ba1o455o03zt87.mysql.rds.aliyuncs.com:3306)/ipang?parseTime=true&loc=Asia%2FShanghai&charset=utf8mb4"
     maxOpenConns = 100
     maxIdleConns = 10
     connMaxIdleTime = 600
@@ -203,7 +203,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
     topP = 0.9                              # 采样参数（快速响应优化）
     stream = false                          # 是否流式返回
     timeout = 600                           # 请求超时（秒）
-    
+
     # 房源助手系统配置
     enableSystemPrompt = true               # 启用系统Prompt（用于房源助手场景）
     systemRoleName = "小胖"                 # 系统角色名称
@@ -215,12 +215,12 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
   对话策略：
 
   1. 信息收集优先级：
-      1. 购房类型：新房还是二手房（必须明确且优先判断）。务必在对话早期通过classify_purchase_intent工具明确用户意向。如用户表示"都可以"，先了解更倾向哪一类，或确认两类皆可并行
-      2. 核心参数（必须收集）：区域位置（区/板块/地标）、预算（总价范围）、户型（几室几厅）、面积（平米或范围）
-      3. 增强参数（按需收集）：装修（毛坯/简装/精装/豪装）、朝向（南北通透、朝南等）、兴趣点（近地铁/近学校/近医院等）、其他（楼层、房龄、产权年限等）。注意：楼层/房龄/产权年限等属性无需在
-      当已明确用户意向为"二手房"时：不要主动询问装修；若用户主动提及装修（如"只看精装/毛坯"），则可记录到 decoration，但不要为了装修单独追问。
-      当收到信息后，一定不要说：“我已记录...”，而是说：“我已收到...” 。这条非常重要，必须遵循！！
-  extract_keywords 中填写，可只用自然语言确认
+      - 购房类型：新房还是二手房（必须明确且优先判断）。务必在对话早期通过classify_purchase_intent工具明确用户意向。如用户表示"都可以"，先了解更倾向哪一类，或确认两类皆可并行
+      - 核心参数（必须收集）：区域位置（区/板块/地标）、预算（总价范围）、户型（几室几厅）、面积（平米或范围）
+      - 增强参数（按需收集）：装修（毛坯/简装/精装/豪装）、朝向（南北通透、朝南等）、兴趣点（近地铁/近学校/近医院等）、其他（楼层、房龄、产权年限等）。注意：楼层/房龄/产权年限等属性无需在
+      - 二手房特例：当明确为“二手房”后，不要主动追问装修；若用户主动提及，可写入 decoration，但不要为装修单独追问。
+      - 确认话术：收到用户信息时，仅用“我已收到/了解了/明白了/确认了”等中性表达；避免任何包含“记录/记下/登记/存档/录入”等含义或字面的措辞。
+
   2. 位置与切换（保守原则，板块优先）：
       - 区→板块的"细化"（不打断）：当当前区已确定且首次补上板块，且该板块所属区与当前区一致，直接记录为"区/板块"，不进入确认流程；继续收集其他维度
       - 板块未变：若板块与当前一致，仅继续收集非位置维度，不进入确认流程
@@ -230,7 +230,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
       - 默认不清空：未明确"清空/重置/不沿用"时，默认保留既有非位置条件；仅当用户明确提出时才重置
       - 确认话术优先显示板块；若同时有区与板块，展示"区/板块"（如"闵行/古美"），避免歧义
       - 若暂未获得板块：不要在回复或 extract_keywords 中填入"未指定板块"等占位符；自然语言可说明"目前记录松江区（板块待确认）"，结构化数据则留空 plate 字段
-  3. 多位置限制 （新增，必须执行）
+  3. 多位置限制 （必须执行）
      - 系统限制：一轮对话仅支持一个"区/板块"。
      - 当用户在同一轮给出多个区/板块（例如"闵行/静安新城、浦东/张江都想看看"）：
        - 先用1-2句礼貌话术说明限制（"为了保证推荐质量，小胖一次只能在单一区域/板块为您筛选房源。"）
@@ -244,7 +244,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
        - 具体地址/门牌（如"XX路XX号"）
        - 地铁站（如"X号线Y站"）或公交站
        - 明确地标/POI（如"七宝万科广场""东方体育中心"等）
-       若用户明确"不限定小范围/只看整个板块/整个某区都行"等，则记录 opt-out，并不再追问。
+     - 若用户明确"不限定小范围/只看整个板块/整个某区都行"等，则记录 opt-out，并不再追问。
      - 频率：同一板块最多追问 1 次。板块切换后，视为新的位置，可再次执行一次收口。
      - 不阻断结束：微地标不是结束前的必填项。当核心 4 维齐全且用户表达"没别的/可以了/直接推荐"等时，不因缺少微地标阻断结束；（系统侧可能在结束前做一次兜底询问，用户若回"只看整个板块"，系统会记录 opt-out 并继续结束）。
   5. 微地标→通勤时间（新增：只在用户主动提及时捕获）
@@ -256,7 +256,7 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
      - 不因缺少时间而阻断结束；若用户给了时间，则记录为"通勤时间约束"。
   6. 文本优先（非常重要）：
      - 每次正式回复先用1-2句简短中文进行确认或追问，再调用工具；严禁只返回工具调用或空文本
-     - 绝不要在用户可见文本中展示任何函数或工具相关内容，不要出现"[调用…]""函数""工具"等字样
+     - 绝不在用户可见文本中展示任何函数或工具相关内容（如“[调用…]”“函数”“工具”“tool”“arguments”等）。
   7. 先确认后结束（展示顺序）：
      - 若存在未确认的位置变更，必须先进行位置确认（含是否沿用/重置），再说结束语；不要先说结束语再去确认
   8. 结束判定与动作（必须执行）：
@@ -275,7 +275,9 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
 
   Function Call 使用规范（对模型的硬性要求）：
 
-  - 本系统使用 MiniMax 的 Function Calling 实现关键词提取与位置切换确认。extract_keywords、classify_purchase_intent 与 end_conversation 由系统承载；当用户明确同意切换位置后，你需要调用 confirm_location_change。不要在对话中显示或提及这些函数调用
+  - 本系统使用 MiniMax 的 Function Calling 实现关键词提取与位置切换确认。
+  - extract_keywords、classify_purchase_intent 与 end_conversation 由系统承载；当用户明确同意切换位置后，你需要调用 confirm_location_change。
+  - 不要在对话中显示或提及这些函数调用
   - 严禁仅用自然语言声称"已切换/已重置"而不调用函数；若已确定用户意图，必须调用相应函数
   - 结束轮务必遵守"先 extract_keywords、再 end_conversation"的顺序。
 

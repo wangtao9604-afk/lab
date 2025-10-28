@@ -1573,6 +1573,7 @@ func (s *KeywordExtractorService) handleIpangPostResultAndSendPDF(userID, openKF
 				log.GetInstance().Sugar.Warn("send suggestion failed: ", err)
 			}
 		}
+		return nil
 	}
 	// 二手房建议
 	if (intent == IntentSecond) && len(resp.Detail.SecHouse) == 0 && len(resp.Detail.SecHouseNoExistParams) > 0 {
@@ -1583,16 +1584,18 @@ func (s *KeywordExtractorService) handleIpangPostResultAndSendPDF(userID, openKF
 				log.GetInstance().Sugar.Warn("send suggestion failed: ", err)
 			}
 		}
+		return nil
 	}
 
-	// 有pdf则发送
-	if resp.Detail.PdfUrl == "" {
-		// 无pdf则根据有无数据给出通用提示
-		hasData := len(resp.Detail.NewHouse) > 0 || len(resp.Detail.SecHouse) > 0
-		if !hasData {
+	hasData := len(resp.Detail.NewHouse) > 0 || len(resp.Detail.SecHouse) > 0
+	if !hasData {
+		// 没有数据，则不用下载Pdf
+		return nil
+	} else {
+		// 有pdf则发送
+		if resp.Detail.PdfUrl == "" {
 			return s.sendTextMessage(userID, openKFID, "当前条件下暂无合适房源，您可以适当放宽预算、面积或户型等条件，我来为您重新检索。")
 		}
-		return nil
 	}
 
 	// 下载->上传->发送

@@ -116,6 +116,7 @@ type Processor struct {
 	thinkWaiterCtx     context.Context
 	thinkWaiterCancel  context.CancelFunc
 	turnSeq            uint64
+	lastReplyHash      uint64
 
 	// 对于同一次pending，仅拦截一次end
 	pendingEndIntercepted bool

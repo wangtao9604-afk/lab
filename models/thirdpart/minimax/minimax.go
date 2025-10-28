@@ -24,6 +24,9 @@ const (
 	classifyPurchaseIntentToolName = "classify_purchase_intent"
 	microLocationToolName          = "extract_micro_location"
 	endConversationMessage         = "为您生成详细的房源推荐报告"
+
+	// 统一的确认话术（正向约束）：仅使用中性“收到/了解/确认/明白”等表达
+	ackStyleConstraint = "确认类表述仅用“我已收到/了解/确认/明白”等中性用语。"
 )
 
 // Client MiniMax API客户端
@@ -293,6 +296,41 @@ func (c *Client) prepareMessages(messages []Message) []Message {
 	return messages
 }
 
+// applyAckStyleGuard:
+// 在请求发送前，统一为 tools/response_format 注入“确认话术”为中性表达的正向约束。
+// 仅追加一行提示，不改动原有功能描述与 schema。
+func (c *Client) applyAckStyleGuard(req *ChatCompletionRequest) {
+	if req == nil {
+		return
+	}
+	// 1) 为每个 function 工具的描述前置一行风格约束（避免重复追加）
+	if len(req.Tools) > 0 {
+		for i := range req.Tools {
+			if req.Tools[i].Type != "function" {
+				continue
+			}
+			d := strings.TrimSpace(req.Tools[i].Function.Description)
+			if d == "" {
+				req.Tools[i].Function.Description = ackStyleConstraint
+			} else if !strings.Contains(d, "确认类表述") {
+				req.Tools[i].Function.Description = ackStyleConstraint + "\n" + d
+			}
+		}
+	}
+
+	// 2) 为响应格式的描述追加同样的正向约束；若 schema 下有 text.description 也一并追加
+	if rf := req.ResponseFormat; rf != nil {
+		rf.JSONSchema.Description = strings.TrimSpace(ackStyleConstraint + "\n" + rf.JSONSchema.Description)
+		if props, ok := rf.JSONSchema.Schema["properties"].(map[string]interface{}); ok {
+			if text, ok := props["text"].(map[string]interface{}); ok {
+				if desc, _ := text["description"].(string); !strings.Contains(desc, "确认类表述") {
+					text["description"] = strings.TrimSpace(ackStyleConstraint + "\n" + desc)
+				}
+			}
+		}
+	}
+}
+
 // ChatCompletion 同步对话接口
 func (c *Client) ChatCompletion(ctx context.Context, messages []Message) (*ChatCompletionResponse, error) {
 	if c.apiKey == "" {
@@ -315,6 +353,8 @@ func (c *Client) ChatCompletion(ctx context.Context, messages []Message) (*ChatC
 		TopP:        c.topP,
 	}
 
+	// 在发送前统一追加“确认话术”为中性表达的正向约束
+	c.applyAckStyleGuard(req)
 	return c.doRequest(ctx, req)
 }
 
@@ -342,6 +382,8 @@ func (c *Client) ChatCompletionWithOptions(ctx context.Context, req *ChatComplet
 		req.Temperature = c.temperature
 	}
 
+	// 统一注入风格约束
+	c.applyAckStyleGuard(req)
 	return c.doRequest(ctx, req)
 }
 
@@ -376,6 +418,7 @@ func (c *Client) ChatCompletionStream(ctx context.Context, messages []Message) (
 			TopP:        c.topP,
 		}
 
+		c.applyAckStyleGuard(req)
 		if err := c.doStreamRequest(ctx, req, chunkChan); err != nil {
 			errChan <- err
 		}
@@ -420,6 +463,8 @@ func (c *Client) ChatCompletionStreamWithOptions(ctx context.Context, req *ChatC
 			req.Temperature = c.temperature
 		}
 
+		// 统一注入风格约束
+		c.applyAckStyleGuard(req)
 		if err := c.doStreamRequest(ctx, req, chunkChan); err != nil {
 			errChan <- err
 		}
@@ -673,6 +718,8 @@ func (c *Client) ChatCompletionWithTools(ctx context.Context, messages []Message
 		ToolChoice:  toolChoice,
 	}
 
+	// 在发送前统一追加“确认话术”为中性表达的正向约束
+	c.applyAckStyleGuard(req)
 	return c.doRequest(ctx, req)
 }
 

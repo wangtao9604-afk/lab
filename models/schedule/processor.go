@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
+
 	"qywx/infrastructures/common"
 	"qywx/infrastructures/config"
 	ikeywords "qywx/infrastructures/keywords"
@@ -47,11 +49,54 @@ var (
 	}
 )
 
+var (
+	ackBanRe        = regexp.MustCompile(`(?i)(我\s*已\s*记\s*录|已\s*记\s*录|帮\s*您\s*记\s*录|我这边\s*记\s*录|这边\s*记\s*录|已为您\s*记\s*录|登记|记下)(了|好)?`)
+	multiQuestionRe = regexp.MustCompile(`[\?？]+`)
+)
+
 // LocCandidate 表示在用户单条消息里识别到的一个位置候选
 type LocCandidate struct {
 	District string
 	Plate    string
 	pos      int // 在原文本里的首现位置，用于排序
+}
+
+// sanitizeAssistantReply 对助手回复做统一净化和精简
+func sanitizeAssistantReply(s string) string {
+	if s == "" {
+		return s
+	}
+	clean := ackBanRe.ReplaceAllString(s, "我已收到")
+	lines := strings.Split(clean, "\n")
+	seen := make(map[string]bool, len(lines))
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "" {
+			out = append(out, ln)
+			continue
+		}
+		if seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		out = append(out, ln)
+	}
+	return strings.Join(out, "\n")
+}
+
+// shouldSendReply 做重复过滤，返回 true 表示可以发送
+func (p *Processor) shouldSendReply(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	h := xxhash.Sum64String(trimmed)
+	if atomic.LoadUint64(&p.lastReplyHash) == h {
+		return false
+	}
+	atomic.StoreUint64(&p.lastReplyHash, h)
+	return true
 }
 
 // detectMultiLocation 从用户本轮文本中识别多位置候选；若数量 >= 2 返回候选列表，否则返回 nil
@@ -450,23 +495,32 @@ func (p *Processor) handleTextMessage(ctx context.Context, deadline time.Time, m
 	log.GetInstance().Sugar.Infof("AI response content lens: raw=%d, trimmed=%d, user=%s",
 		len(responseContent), len(strings.TrimSpace(responseContent)), msg.ExternalUserID)
 
+	// 4.1 若助手文本中包含“伪工具调用”标记（如：[调用confirm_location_change: …]），先解析并应用
+	p.maybeApplyPseudoToolCallsFromText(responseContent)
+	responseContent = sanitizeAssistantReply(responseContent)
+
+	trimmedContent := strings.TrimSpace(responseContent)
+
 	// 如果是空内容（仅tool_calls无文本），生成“确认+追问”的最小可读回复，避免用户感知为无应答
-	if strings.TrimSpace(responseContent) == "" {
+	if trimmedContent == "" {
 		log.GetInstance().Sugar.Info("AI response contains only tool calls for user, no message ", msg.ExternalUserID)
 		// 启动“思考中”轮询机制（3s占位，最多10s兜底）
 		log.GetInstance().Sugar.Infof("Start thinking waiter: seq=%d, user=%s", curSeq, msg.ExternalUserID)
 		p.startThinkingWaiter(ctx, msg)
 		return nil
 	} else {
-		// 4.1 若助手文本中包含“伪工具调用”标记（如：[调用confirm_location_change: …]），先解析并应用，随后再入历史与下发
-		p.maybeApplyPseudoToolCallsFromText(responseContent)
 		// 4.2 抑制连续重复文本：若与上一条assistant文本内容完全一致，则不再重复发送
 		if p.isDuplicateAssistantText(responseContent) {
 			log.GetInstance().Sugar.Info("Suppressed duplicate assistant text for user ", msg.ExternalUserID)
 			// 不中断逻辑：若AI标记结束，后续结束处理仍会继续；否则本轮就不重复回帖
 			responseContent = ""
 		}
-		if strings.TrimSpace(responseContent) != "" {
+		trimmedContent = strings.TrimSpace(responseContent)
+		if trimmedContent != "" {
+			if !p.shouldSendReply(responseContent) {
+				log.GetInstance().Sugar.Debug("Skip sending duplicate assistant content for user ", msg.ExternalUserID)
+				return nil
+			}
 			// 5. 添加AI回复到对话历史
 			if err := p.addAssistantMessage(responseContent, true); err != nil {
 				log.GetInstance().Sugar.Error("Failed to add assistant message to history: ", err)
@@ -2281,14 +2335,15 @@ func (p *Processor) tryRepollForTextWithCtx(waitCtx context.Context, mySeq uint6
 			// 再尝试抽取自然语言
 			txtRaw := p.extractResponseContent(resp.Content)
 			txtFiltered := p.suppressDecorationAskIfSecondHand(txtRaw)
-			txt := strings.TrimSpace(txtFiltered)
+			txtSanitized := sanitizeAssistantReply(txtFiltered)
+			txt := strings.TrimSpace(txtSanitized)
 			log.GetInstance().Sugar.Debugf("Repoll(%s/%v) content_len=%d", toolChoice, withNudge, len(txt))
 			if txt != "" {
 				// 若本轮已过期，不把文本发给用户，但仍继续按一致的结束/收尾逻辑处理，避免错过及时结束
 				if !p.isOutdatedSeq(mySeq) {
 					if p.isDuplicateAssistantText(txt) {
 						log.GetInstance().Sugar.Info("Suppressed duplicate assistant text in repoll for user ", msg.ExternalUserID)
-					} else {
+					} else if p.shouldSendReply(txt) {
 						// 先把文本发给用户，再按主流程同样的结束/拦截逻辑处理
 						if err := p.addAssistantMessage(txt, true); err == nil {
 							_ = p.sendAIReply(p.ctx, msg, txt)
@@ -2296,6 +2351,8 @@ func (p *Processor) tryRepollForTextWithCtx(waitCtx context.Context, mySeq uint6
 						} else {
 							log.GetInstance().Sugar.Warnf("Repoll addAssistantMessage failed: %v", err)
 						}
+					} else {
+						log.GetInstance().Sugar.Debug("Skip sending duplicate repoll content for user ", msg.ExternalUserID)
 					}
 				} else {
 					log.GetInstance().Sugar.Info("Repoll text is outdated; skip sending but apply end-handling if any")
@@ -3178,6 +3235,14 @@ func (p *Processor) tryServerAutoEnd(ctx context.Context, msg *kefu.KFRecvMessag
 	} else if !strings.Contains(final, endLine) {
 		final = final + "\n" + endLine
 	}
+	final = sanitizeAssistantReply(final)
+	if !p.shouldSendReply(final) {
+		log.GetInstance().Sugar.Debug("Skip sending duplicate auto-end reply for user ", msg.ExternalUserID)
+		p.sendToFurtherProcess()
+		p.logConversationEnd(nil)
+		log.GetInstance().Sugar.Infof("Auto-ended by server fallback for user %s", msg.ExternalUserID)
+		return true
+	}
 
 	// 5) 入历史并发送
 	if err := p.addAssistantMessage(final, true); err != nil {
@@ -3203,7 +3268,7 @@ func containsAny(text string, arr []string) bool {
 	}
 	for _, s := range arr {
 		if s == "？" || s == "?" {
-			if regexp.MustCompile(`[\?？]+`).MatchString(t) {
+			if multiQuestionRe.MatchString(t) {
 				return true
 			}
 			continue
