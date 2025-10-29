@@ -1,0 +1,27 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Shanghai \
+    LANG=zh_CN.UTF-8 \
+    LC_ALL=zh_CN.UTF-8
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata locales \
+    && locale-gen zh_CN.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --home /var/lib/qywx --shell /usr/sbin/nologin qywx
+
+WORKDIR /opt/qywx
+
+RUN mkdir -p /etc/qywx /var/log/qywx
+
+COPY bin/consumer-linux-amd64.dbg /opt/qywx/consumer
+COPY docker/microservices/prod/config.toml /etc/qywx/config.toml
+
+RUN chmod +x /opt/qywx/consumer \
+    && chown -R qywx:qywx /opt/qywx /var/log/qywx /etc/qywx
+
+USER qywx
+
+ENTRYPOINT ["./consumer"]

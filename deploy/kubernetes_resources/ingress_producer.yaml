@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: qywx-producer-entry
+  namespace: qywx
+  annotations:
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/subnets: vsw-uf6t3wh6ngmv9ri5a8yec,vsw-uf6jwqhjvy2uuis2o41wb
+    
+spec:
+  ingressClassName: alb
+  rules:
+    - host: work.ipangsell.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: qywx-producer
+                port:
+                  number: 11112

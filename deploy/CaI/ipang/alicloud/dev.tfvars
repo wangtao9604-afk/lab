@@ -1,0 +1,8 @@
+region                  = "cn-shanghai"
+first_available_zone    = "cn-shanghai-e"
+second_available_zone   = "cn-shanghai-f"
+business_name           = "ipang"
+system_instance_type    = "ecs.g9i.xlarge"
+core_instance_type      = "ecs.c9i.2xlarge"
+consumers_instance_type = "ecs.c9i.3xlarge"
+rds_password            = "AdminPass#2025"

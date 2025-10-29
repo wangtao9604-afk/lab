@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: qywx-producer
+  namespace: qywx
+  labels:
+    app: qywx-producer
+spec:
+  selector:
+    app: qywx-producer
+  ports:
+    - name: http
+      port: 11112
+      targetPort: 11112
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qywx-consumer
+  namespace: qywx
+  labels:
+    app: qywx-consumer
+spec:
+  selector:
+    app: qywx-consumer
+  ports:
+    - name: http
+      port: 11113
+      targetPort: 11113
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qywx-recorder
+  namespace: qywx
+  labels:
+    app: qywx-recorder
+spec:
+  selector:
+    app: qywx-recorder
+  ports:
+    - name: http
+      port: 11114
+      targetPort: 11114

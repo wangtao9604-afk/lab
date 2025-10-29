@@ -1,0 +1,25 @@
+# 参照 Alicloud_Deployment_Guideline_V2.md 的监控配置
+grafana:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 300s
+    evaluationInterval: 300s
+    scrapeTimeout: 10s
+    retention: 15d
+    externalLabels:
+      cluster: ipang-ack-prod
+      env: prod
+    remoteWrite:
+      - url: "https://workspace-default-cms-1607333126299012-cn-shanghai.cn-shanghai-intranet.log.aliyuncs.com/prometheus/workspace-default-cms-1607333126299012-cn-shanghai/aliyun-prom-6p5ivd85gu/api/v1/write"
+        writeRelabelConfigs:
+          - sourceLabels: [namespace]
+            regex: "(qywx|monitoring|)"
+            action: keep
+          - sourceLabels: [namespace, __name__]
+            regex: "(|monitoring);.+_bucket"
+            action: drop
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false

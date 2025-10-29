@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qywx-recorder
+  namespace: qywx
+  labels:
+    app: qywx-recorder
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: qywx-recorder
+  template:
+    metadata:
+      labels:
+        app: qywx-recorder
+    spec:
+      imagePullSecrets:
+        - name: acr-pull-secret
+      nodeSelector:
+        pool: core
+      tolerations:
+        - key: pool
+          operator: Equal
+          value: core
+          effect: NoSchedule
+      containers:
+        - name: qywx-recorder
+          image: crpi-bhf5prt6r8uymetk.cn-shanghai.personal.cr.aliyuncs.com/ns-ipang-278845/recorder:release_20251027_01
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 11114
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

@@ -1,0 +1,185 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: qywx-apps
+  namespace: qywx
+  labels:
+    release: kps
+spec:
+  jobLabel: app
+  namespaceSelector:
+    matchNames:
+      - qywx
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - qywx-producer
+          - qywx-consumer
+          - qywx-recorder
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 300s
+      scrapeTimeout: 10s
+      honorLabels: true
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: qywx-rules-and-alerts
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: qywx-recorder
+      interval: 300s
+      rules:
+        - record: qywx:recorder_consume_batch_seconds:p95:by_job_topic
+          expr: >
+            histogram_quantile(0.95,
+            sum by (le, job, topic) (rate(qywx_recorder_consume_batch_seconds_bucket[5m])))
+        - record: qywx:recorder_db_insert_total_seconds:p95
+          expr: >
+            histogram_quantile(0.95,
+            sum by (le) (rate(qywx_recorder_db_insert_total_seconds_bucket[5m])))
+        - record: qywx:recorder_db_insert_batches:rate5m:by_result
+          expr: sum by (result) (rate(qywx_recorder_db_insert_batches_total[5m]))
+        - record: qywx:recorder_db_pool:inuse_ratio
+          expr: clamp_max(qywx_recorder_db_pool_in_use / clamp_min(qywx_recorder_db_pool_open, 1), 1)
+        - record: qywx:recorder_db_wait:count_rate5m
+          expr: rate(qywx_recorder_db_wait_count_total[5m])
+        - record: qywx:recorder_db_wait:seconds_rate5m
+          expr: rate(qywx_recorder_db_wait_seconds_total[5m])
+    - name: qywx-kmq
+      interval: 300s
+      rules:
+        - record: qywx:kmq_batch_commit:inc5m:sum_by_topic
+          expr: sum by (topic) (increase(qywx_kmq_batch_commit_total[30m]))
+        - record: qywx:kmq_batch_commit:inc5m:sum_by_job_topic
+          expr: sum by (job, topic) (increase(qywx_kmq_batch_commit_total[30m]))
+        - record: qywx:kmq_batch_commit:rate5m:sum_by_topic
+          expr: sum by (topic) (rate(qywx_kmq_batch_commit_total[30m]))
+        - record: qywx:kmq_batch_commit:rate5m:sum_by_job_topic
+          expr: sum by (job, topic) (rate(qywx_kmq_batch_commit_total[30m]))
+        - record: qywx:kmq_batch_commit_failed:inc5m:sum_by_job_topic
+          expr: sum by (job, topic) (increase(qywx_kmq_batch_commit_failed_total[30m]))
+        - record: qywx:kmq_batch_commit_failed:rate5m:sum_by_job_topic
+          expr: sum by (job, topic) (rate(qywx_kmq_batch_commit_failed_total[30m]))
+        - record: qywx:kmq_batch_commit_fail_ratio:5m:by_job_topic
+          expr: >
+            sum by (job, topic) (increase(qywx_kmq_batch_commit_failed_total[30m])) /
+            clamp_min(sum by (job, topic) (increase(qywx_kmq_batch_commit_total[30m])), 1)
+        - record: qywx:kmq_gate_backlog:curr:max_by_topic_partition
+          expr: max by (topic, partition) (qywx_kmq_gate_backlog)
+        - record: qywx:kmq_gate_backlog:curr:max_by_job_topic_partition
+          expr: max by (job, topic, partition) (qywx_kmq_gate_backlog)
+        - record: qywx:kmq_gate_backlog:5m_max:max_by_topic_partition
+          expr: max by (topic, partition) (max_over_time(qywx_kmq_gate_backlog[30m]))
+        - record: qywx:kmq_gate_backlog:5m_max:max_by_job_topic_partition
+          expr: max by (job, topic, partition) (max_over_time(qywx_kmq_gate_backlog[30m]))
+        - record: qywx:kmq_rebalance:inc1h:by_group_type
+          expr: sum by (group, type) (increase(qywx_kmq_rebalance_total[30m]))
+        - record: qywx:kmq_rebalance:rate5m:by_group_type
+          expr: sum by (group, type) (rate(qywx_kmq_rebalance_total[30m]))
+        - record: qywx:kmq_dlq:inc5m:by_component_topic
+          expr: sum by (component, topic) (increase(qywx_kmq_dlq_messages_total[30m]))
+        - record: qywx:kmq_dlq:rate5m:by_component_topic
+          expr: sum by (component, topic) (rate(qywx_kmq_dlq_messages_total[30m]))
+        - record: qywx:kmq_dlq:inc5m:by_topic
+          expr: sum by (topic) (increase(qywx_kmq_dlq_messages_total[30m]))
+    - name: qywx-kf
+      interval: 300s
+      rules:
+        - record: qywx:kf_handle_seconds:p95:by_job_type
+          expr: >
+            histogram_quantile(0.95,
+            sum by (le, job, msg_type) (rate(qywx_kf_handle_seconds_bucket[5m])))
+        - record: qywx:kf_errors:rate5m:by_job_stage
+          expr: sum by (job, stage) (rate(qywx_kf_errors_total[5m]))
+    - name: qywx-alerts
+      interval: 300s
+      rules:
+        - alert: FetcherLeaderNotUnique
+          expr: qywx:fetcher_leader:count_by_job != 1
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: "Fetcher leader count != 1 (job={{ $labels.job }})"
+            description: "期望每个 job 正好 1 个 leader，当前={{ $value }}。请检查选主与 Pod 健康。"
+        - alert: KafkaRebalanceStorm
+          expr: sum by (group) (increase(qywx_kmq_rebalance_total[30m])) > 20
+          for: 5m
+          labels:
+            severity: warning
+            category: stability
+          annotations:
+            summary: "Excessive Kafka rebalances (group={{ $labels.group }})"
+            description: "1h 内再均衡 {{ $value }} 次。检查消费者存活、分区分配与 broker 稳定性。"
+        - alert: KmqGateBacklogHigh
+          expr: qywx:kmq_gate_backlog:5m_max:max_by_topic_partition > 1000
+          for: 10m
+          labels:
+            severity: warning
+            category: throughput
+          annotations:
+            summary: "Gate backlog high (topic={{ $labels.topic }}, partition={{ $labels.partition }})"
+            description: "5m 峰值超过阈值。可能生产>消费；检查 consumer 资源与处理时延。"
+        - alert: DLQSurge
+          expr: sum by (component, topic) (increase(qywx_kmq_dlq_messages_total[10m])) > 100
+          for: 5m
+          labels:
+            severity: warning
+            category: reliability
+          annotations:
+            summary: "DLQ surged (component={{ $labels.component }}, topic={{ $labels.topic }})"
+            description: "10m 内死信数 {{ $value }}。检查最近变更、消息格式与下游依赖。"
+        - alert: RecorderDBErrorRateHigh
+          expr: >
+            (sum(rate(qywx_recorder_db_insert_batches_total{result!~"success|ok"}[5m])) /
+            clamp_min(sum(rate(qywx_recorder_db_insert_batches_total[5m])), 1)) > 0.05
+          for: 10m
+          labels:
+            severity: critical
+            category: data
+          annotations:
+            summary: "Recorder DB error rate > 5%"
+            description: "5m 错误写入占比 {{ humanizePercentage $value }}。检查 RDS 连通/锁冲突/Schema。"
+        - alert: RecorderDBPoolSaturation
+          expr: qywx:recorder_db_pool:inuse_ratio > 0.90
+          for: 10m
+          labels:
+            severity: warning
+            category: capacity
+          annotations:
+            summary: "Recorder DB pool near saturation (>90%)"
+            description: "当前 InUse/Open 比例 {{ $value }}。考虑调大池、优化 SQL 或扩容。"
+    - name: qywx-fetcher
+      interval: 300s
+      rules:
+        - record: qywx:fetcher_leader:count_by_job
+          expr: sum by (job) (qywx_fetcher_leader)
+        - record: qywx:fetcher_leader:is_unique_by_job
+          expr: clamp_max(clamp_min(qywx:fetcher_leader:count_by_job, 1), 1)
+        - record: qywx:fetcher_acquire:rate5m:by_job_result
+          expr: sum by (job, result) (rate(qywx_fetcher_acquire_total[5m]))
+        - record: qywx:fetcher_cas:success_ratio:5m:by_job
+          expr: >
+            sum by (job) (rate(qywx_fetcher_cas_total{result=~"ok|success"}[5m])) /
+            clamp_min(sum by (job) (rate(qywx_fetcher_cas_total[5m])), 1)
+        - record: qywx:fetcher_pull_batch_seconds:p95:by_job
+          expr: >
+            histogram_quantile(0.95,
+            sum by (le, job) (rate(qywx_fetcher_pull_batch_seconds_bucket[5m])))
+        - record: qywx:fetcher_pull_batch_seconds:p99:by_job
+          expr: >
+            histogram_quantile(0.99,
+            sum by (le, job) (rate(qywx_fetcher_pull_batch_seconds_bucket[5m])))
+        - record: qywx:fetcher_pull_batch_size:p95:by_job
+          expr: >
+            histogram_quantile(0.95,
+            sum by (le, job) (rate(qywx_fetcher_pull_batch_size_bucket[5m])))
