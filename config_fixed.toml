@@ -24,15 +24,6 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
         readTimeout = 3    # 读取超时(秒)
         writeTimeout = 3   # 写入超时(秒)
 
-[suite]
-    token = "CkVrLV1hF6sfNFwQrp0c"
-    encodingAESKey =  "ChSxQ72OW4Fu4DzFBwkMkK3VbjHENw3N2d8K3BJZx61"
-    suiteId = "ww24103d9c43d9ccc6"
-    agentId = "1000007"
-    secret = "CezDsHu0inUlG1nsp7qsKE1D6xjyayzHcI9nLxWqENc"
-    ticketTimeOut = 600
-    kfId = "wk6Gh8CQAAzVDDh-FSfINc1O_iedSUJQ"
-
 [misc]
     templateId = ""
     authTokenSecret = ""
@@ -54,12 +45,6 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
 [services.recorder]
     httpAddr = ":11114"
 
-# Ipang房产查询API配置
-[ipang]
-    appId = "xp6121770875700571"                      # 应用ID（从API文档获取）
-    appSecret = "VnaAJspwH89hPtu3ef2EGZL75MjYvcB6"    # 应用密钥（从API文档获取）
-    baseUrl = "https://ai.ipangsell.com"              # API基础URL
-
 [keywords]
     # strict: 完全过滤租售相关消息（默认，纯买房场景）
     # ignore: 忽略租金价格字段，但保留其他字段（买租混合，保留地段/户型等）
@@ -68,12 +53,6 @@ platform = 2  # 1=web, 2=mobile, 3=ignore
     travelSpeedWalkMpm = 80
     travelSpeedBikeMpm = 230
     travelSpeedDriveMpm = 800
-
-# 高德地图API配置
-[gaode]
-    apiKey = "909bd767aca3851fbcbb665e421fc5e9"  # 高德地图Web服务API Key
-    baseUrl = "https://restapi.amap.com"         # API基础URL（默认值，可自定义代理地址）
-    timeout = 10                                 # 请求超时时间（秒）
 
 [kafka]
     brokers = "alikafka-post-cn-9a94hpq1n004-1-vpc.alikafka.aliyuncs.com:9092,alikafka-post-cn-9a94hpq1n004-2-vpc.alikafka.aliyuncs.com:9092,alikafka-post-cn-9a94hpq1n004-3-vpc.alikafka.aliyuncs.com:9092"
